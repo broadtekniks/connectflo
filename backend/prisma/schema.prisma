@@ -1,0 +1,143 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+enum Role {
+  ADMIN
+  AGENT
+  CUSTOMER
+}
+
+enum ChannelType {
+  CHAT
+  EMAIL
+  VOICE
+  SMS
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+enum MessageSender {
+  CUSTOMER
+  AGENT
+  AI
+  SYSTEM
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  avatar    String?
+  role      Role     @default(CUSTOMER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  assignedConversations Conversation[] @relation("AssignedAgent")
+  conversations         Conversation[] @relation("Customer")
+}
+
+model Conversation {
+  id           String             @id @default(uuid())
+  channel      ChannelType
+  status       ConversationStatus @default(OPEN)
+  subject      String?
+  priority     String             @default("MEDIUM") // LOW, MEDIUM, HIGH
+  sentiment    Sentiment          @default(NEUTRAL)
+  tags         String[]
+  lastActivity DateTime           @default(now())
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  // Relations
+  customerId String
+  customer   User      @relation("Customer", fields: [customerId], references: [id])
+  assigneeId String?
+  assignee   User?     @relation("AssignedAgent", fields: [assigneeId], references: [id])
+  messages   Message[]
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  content        String
+  sender         MessageSender
+  isPrivateNote  Boolean       @default(false)
+  attachments    String[]
+  createdAt      DateTime      @default(now())
+  
+  // Relations
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id])
+}
+
+model Document {
+  id        String                 @id @default(uuid())
+  name      String
+  type      String                 // pdf, docx, txt
+  size      Int
+  url       String
+  status    String                 // INDEXED, PROCESSING, ERROR
+  content   String?                // Extracted text content
+  embedding Unsupported("vector")? // pgvector embedding
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+}
+
+model Integration {
+  id          String   @id @default(uuid())
+  name        String
+  icon        String
+  connected   Boolean  @default(false)
+  description String
+  category    String
+  config      Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Workflow {
+  id          String   @id @default(uuid())
+  name        String
+  description String
+  isActive    Boolean  @default(false)
+  triggerType String
+  runs        Int      @default(0)
+  lastRun     DateTime?
+  nodes       Json     // Storing nodes as JSON for flexibility
+  edges       Json     // Storing edges as JSON for flexibility
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PhoneNumber {
+  id           String   @id @default(uuid())
+  number       String   @unique
+  friendlyName String
+  country      String
+  region       String
+  type         String
+  capabilities Json     // { voice: boolean, sms: boolean, mms: boolean }
+  monthlyCost  Float
+  setupCost    Float?
+  status       String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

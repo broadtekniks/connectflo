@@ -1,0 +1,7 @@
+{
+  "name": "ConnectFlo",
+  "description": "A multi-tenant, AI-driven customer support platform featuring a unified inbox, live analytics, and agentic workflows.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
