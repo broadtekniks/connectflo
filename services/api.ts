@@ -105,4 +105,39 @@ export const api = {
       return response.json();
     },
   },
+
+  workflows: {
+    list: async (): Promise<any[]> => {
+      const response = await fetch(`${API_URL}/workflows`);
+      if (!response.ok) throw new Error("Failed to fetch workflows");
+      return response.json();
+    },
+    create: async (data: any): Promise<any> => {
+      const response = await fetch(`${API_URL}/workflows`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to create workflow");
+      return response.json();
+    },
+    update: async (id: string, data: any): Promise<any> => {
+      const response = await fetch(`${API_URL}/workflows/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to update workflow");
+      return response.json();
+    },
+    simulate: async (triggerType: string, context: any): Promise<any> => {
+      const response = await fetch(`${API_URL}/workflows/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ triggerType, context }),
+      });
+      if (!response.ok) throw new Error("Failed to simulate workflow");
+      return response.json();
+    },
+  },
 };

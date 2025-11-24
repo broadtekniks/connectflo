@@ -342,6 +342,7 @@ interface ConnectionLineProps {
   label?: string;
   isSelected: boolean;
   onClick: (e: React.MouseEvent) => void;
+  onDelete: () => void;
 }
 
 const ConnectionLine: React.FC<ConnectionLineProps> = ({
@@ -350,6 +351,7 @@ const ConnectionLine: React.FC<ConnectionLineProps> = ({
   label,
   isSelected,
   onClick,
+  onDelete,
 }) => {
   // Calculate Bezier curve for smooth connection
   const path = `M ${start.x} ${start.y} C ${start.x} ${start.y + 50}, ${
@@ -357,7 +359,7 @@ const ConnectionLine: React.FC<ConnectionLineProps> = ({
   } ${end.y - 50}, ${end.x} ${end.y}`;
 
   return (
-    <g onClick={onClick} className="group">
+    <g onClick={onClick} className="group pointer-events-auto">
       {/* Thick transparent stroke for easier hovering/selecting */}
       <path
         d={path}
@@ -399,6 +401,32 @@ const ConnectionLine: React.FC<ConnectionLineProps> = ({
           </text>
         </g>
       )}
+
+      {/* Delete Button (Visible when selected) */}
+      {isSelected && (
+        <g
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="cursor-pointer hover:opacity-80"
+        >
+          <circle
+            cx={(start.x + end.x) / 2}
+            cy={(start.y + end.y) / 2}
+            r="10"
+            fill="#ef4444"
+            stroke="white"
+            strokeWidth="1"
+          />
+          <Trash2
+            size={12}
+            x={(start.x + end.x) / 2 - 6}
+            y={(start.y + end.y) / 2 - 6}
+            color="white"
+          />
+        </g>
+      )}
     </g>
   );
 };
@@ -407,8 +435,22 @@ const ConnectionLine: React.FC<ConnectionLineProps> = ({
 
 const Workflows: React.FC = () => {
   const [view, setView] = useState<"list" | "builder">("list");
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [selectedWorkflowMeta, setSelectedWorkflowMeta] =
     useState<Workflow | null>(null);
+
+  useEffect(() => {
+    loadWorkflows();
+  }, []);
+
+  const loadWorkflows = async () => {
+    try {
+      const data = await api.workflows.list();
+      setWorkflows(data);
+    } catch (error) {
+      console.error("Failed to load workflows:", error);
+    }
+  };
 
   // Builder State
   const [nodes, setNodes] = useState<WorkflowNode[]>([]);
@@ -463,9 +505,58 @@ const Workflows: React.FC = () => {
     setSelectedEdgeId(null);
   };
 
-  const handleSimulate = () => {
+  const handleNewWorkflow = async () => {
+    try {
+      const newWorkflow = await api.workflows.create({
+        name: "Untitled Workflow",
+        description: "New workflow description",
+        triggerType: "Manual"
+      });
+      setSelectedWorkflowMeta(newWorkflow);
+      setNodes([]);
+      setEdges([]);
+      setView("builder");
+      setIsSimulating(false);
+      setActiveSimNodeId(null);
+      setSelectedNodeId(null);
+      setSelectedEdgeId(null);
+      loadWorkflows();
+    } catch (error) {
+      console.error("Failed to create workflow:", error);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!selectedWorkflowMeta) return;
+    
+    // Infer trigger type from the canvas
+    const triggerNode = nodes.find(n => n.type === 'trigger');
+    const triggerType = triggerNode ? triggerNode.label : "Manual";
+
+    try {
+      await api.workflows.update(selectedWorkflowMeta.id, {
+        ...selectedWorkflowMeta,
+        nodes,
+        edges,
+        triggerType,
+        isActive: true // Auto-activate for now so testing works immediately
+      });
+      loadWorkflows();
+      setView("list");
+    } catch (error) {
+      console.error("Failed to save workflow:", error);
+    }
+  };
+
+  const handleSimulate = async () => {
     if (isSimulating || nodes.length === 0) return;
     setIsSimulating(true);
+
+    // Trigger backend simulation
+    const triggerNode = nodes.find(n => n.type === 'trigger');
+    if (triggerNode) {
+        api.workflows.simulate(triggerNode.label, { source: "simulator" }).catch(console.error);
+    }
 
     // Simple linear simulation for demo visualization
     // Real simulation would traverse the graph based on edges
@@ -667,6 +758,11 @@ const Workflows: React.FC = () => {
     if (selectedNodeId === nodeId) setSelectedNodeId(null);
   };
 
+  const handleDeleteEdge = (edgeId: string) => {
+    setEdges((eds) => eds.filter((e) => e.id !== edgeId));
+    if (selectedEdgeId === edgeId) setSelectedEdgeId(null);
+  };
+
   // Handle Delete key for both nodes and edges
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -682,8 +778,7 @@ const Workflows: React.FC = () => {
           handleDeleteNode(selectedNodeId);
         }
         if (selectedEdgeId) {
-          setEdges((eds) => eds.filter((e) => e.id !== selectedEdgeId));
-          setSelectedEdgeId(null);
+          handleDeleteEdge(selectedEdgeId);
         }
       }
     };
@@ -714,13 +809,16 @@ const Workflows: React.FC = () => {
                   Automate agent tasks and AI responses with visual flows.
                 </p>
               </div>
-              <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-sm">
+              <button 
+                onClick={handleNewWorkflow}
+                className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-sm"
+              >
                 <Plus size={18} /> New Workflow
               </button>
             </div>
 
             <div className="grid grid-cols-1 gap-4">
-              {MOCK_WORKFLOWS.map((wf) => (
+              {workflows.map((wf) => (
                 <div
                   key={wf.id}
                   className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all flex items-center justify-between group"
@@ -780,9 +878,17 @@ const Workflows: React.FC = () => {
                 <ArrowRight className="rotate-180" size={16} /> Back
               </button>
               <div className="h-6 w-px bg-slate-200"></div>
-              <h2 className="font-bold text-lg text-slate-800">
-                {selectedWorkflowMeta?.name}
-              </h2>
+              <input
+                type="text"
+                value={selectedWorkflowMeta?.name || ""}
+                onChange={(e) =>
+                  setSelectedWorkflowMeta((prev) =>
+                    prev ? { ...prev, name: e.target.value } : null
+                  )
+                }
+                className="font-bold text-lg text-slate-800 border-none focus:ring-0 bg-transparent placeholder-slate-400 hover:bg-slate-50 rounded px-2 -ml-2 transition-colors"
+                placeholder="Workflow Name"
+              />
               <span className="px-2 py-0.5 bg-green-50 text-green-700 text-xs font-bold rounded border border-green-100">
                 Active
               </span>
@@ -812,7 +918,10 @@ const Workflows: React.FC = () => {
                   </>
                 )}
               </button>
-              <button className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50">
+              <button 
+                onClick={handleSave}
+                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50"
+              >
                 Save Changes
               </button>
             </div>
@@ -924,6 +1033,7 @@ const Workflows: React.FC = () => {
                       label={edge.label}
                       isSelected={selectedEdgeId === edge.id}
                       onClick={(e) => handleEdgeClick(e, edge.id)}
+                      onDelete={() => handleDeleteEdge(edge.id)}
                     />
                   );
                 })}
@@ -1085,6 +1195,57 @@ const Workflows: React.FC = () => {
                       <p className="text-[10px] text-slate-400 mt-1">
                         Choose which inbound line triggers this flow.
                       </p>
+                    </div>
+                  )}
+
+                  {/* Specific Configuration: AI Generate */}
+                  {selectedNode.label === "AI Generate" && (
+                    <div className="pt-6 border-t border-slate-100 space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                          System Prompt (Persona)
+                        </label>
+                        <textarea
+                          rows={4}
+                          placeholder="You are a helpful assistant..."
+                          value={selectedNode.config?.systemPrompt || ""}
+                          onChange={(e) =>
+                            updateNode(selectedNode.id, {
+                              config: {
+                                ...selectedNode.config,
+                                systemPrompt: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                        />
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Define the AI's personality and instructions.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                          Initial Message (Welcome)
+                        </label>
+                        <textarea
+                          rows={2}
+                          placeholder="Hello! How can I help you?"
+                          value={selectedNode.config?.initialMessage || ""}
+                          onChange={(e) =>
+                            updateNode(selectedNode.id, {
+                              config: {
+                                ...selectedNode.config,
+                                initialMessage: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                        />
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          The first thing the AI says when this node runs.
+                        </p>
+                      </div>
                     </div>
                   )}
                 </div>

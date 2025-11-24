@@ -10,6 +10,8 @@ import conversationRoutes from "./routes/conversations";
 import messageRoutes from "./routes/messages";
 import aiRoutes from "./routes/ai";
 import phoneNumberRoutes from "./routes/phoneNumbers";
+import webhookRoutes from "./routes/webhooks";
+import workflowRoutes from "./routes/workflows";
 
 const app = express();
 const port = process.env.PORT || 3002;
@@ -32,6 +34,8 @@ app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/phone-numbers", phoneNumberRoutes);
+app.use("/api/workflows", workflowRoutes);
+app.use("/webhooks", webhookRoutes);
 
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
