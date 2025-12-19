@@ -382,6 +382,13 @@ export const api = {
       if (!response.ok) throw new Error("Failed to update workflow");
       return response.json();
     },
+    delete: async (id: string): Promise<void> => {
+      const response = await fetch(`${API_URL}/workflows/${id}`, {
+        method: "DELETE",
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to delete workflow");
+    },
     simulate: async (triggerType: string, context: any): Promise<any> => {
       const response = await fetch(`${API_URL}/workflows/simulate`, {
         method: "POST",

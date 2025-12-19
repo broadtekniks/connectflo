@@ -84,7 +84,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       icon: MessageSquare,
       roles: ["TENANT_ADMIN", "AGENT"],
     },
-   ];
+  ];
 
   const filteredNavItems = navItems.filter((item) =>
     item.roles.includes(userRole)

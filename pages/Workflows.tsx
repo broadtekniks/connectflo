@@ -24,7 +24,20 @@ import {
   GitBranch,
   Repeat,
   MessageSquare,
+  FileText,
+  Link,
+  Bot,
 } from "lucide-react";
+
+const API_URL = "http://localhost:3002/api";
+
+const authHeader = () => {
+  const token = localStorage.getItem("token");
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+};
 
 // --- Component Library Definition ---
 
@@ -70,6 +83,26 @@ const COMPONENT_LIBRARY = [
         icon: ShoppingBag,
         type: "trigger",
         subLabel: "E-commerce Event",
+      },
+    ],
+  },
+  {
+    category: "Configuration",
+    color: "text-blue-500",
+    bg: "bg-blue-50",
+    border: "border-blue-200",
+    items: [
+      {
+        label: "Knowledge Base",
+        icon: FileText,
+        type: "config",
+        subLabel: "Assign documents",
+      },
+      {
+        label: "AI Configuration",
+        icon: Bot,
+        type: "config",
+        subLabel: "Set AI behavior",
       },
     ],
   },
@@ -474,6 +507,25 @@ const Workflows: React.FC = () => {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   const [ownedNumbers, setOwnedNumbers] = useState<PhoneNumber[]>([]);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [workflowToDelete, setWorkflowToDelete] = useState<Workflow | null>(
+    null
+  );
+  const [workflowResources, setWorkflowResources] = useState<any>({
+    phoneNumbers: [],
+    documents: [],
+    integrations: [],
+    aiConfig: null,
+  });
+  const [availableDocuments, setAvailableDocuments] = useState<any[]>([]);
+  const [availableIntegrations, setAvailableIntegrations] = useState<any[]>([]);
+  const [availableAiConfigs, setAvailableAiConfigs] = useState<any[]>([]);
+  const [planLimits, setPlanLimits] = useState<any>({
+    maxPhoneNumbersPerWorkflow: 2,
+    maxDocumentsPerWorkflow: 10,
+    maxIntegrationsPerWorkflow: 3,
+  });
+  const [isGeneratingGreeting, setIsGeneratingGreeting] = useState(false);
 
   useEffect(() => {
     const fetchNumbers = async () => {
@@ -487,9 +539,184 @@ const Workflows: React.FC = () => {
     fetchNumbers();
   }, []);
 
+  useEffect(() => {
+    if (selectedWorkflowMeta?.id) {
+      loadWorkflowResources();
+      loadAvailableResources();
+    }
+  }, [selectedWorkflowMeta?.id]);
+
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+
+  // --- Resource Management Functions ---
+
+  const loadWorkflowResources = async () => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/resources`,
+        {
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setWorkflowResources(data);
+      }
+    } catch (error) {
+      console.error("Failed to load workflow resources:", error);
+    }
+  };
+
+  const loadAvailableResources = async () => {
+    try {
+      // Load documents
+      const docsResponse = await fetch(`${API_URL}/knowledge-base/documents`, {
+        headers: authHeader(),
+      });
+      if (docsResponse.ok) {
+        const docs = await docsResponse.json();
+        setAvailableDocuments(docs);
+      }
+
+      // Load integrations
+      // const integrationsResponse = await fetch(`${API_URL}/integrations`, {
+      //   headers: authHeader(),
+      // });
+      // if (integrationsResponse.ok) {
+      //   const integrations = await integrationsResponse.json();
+      //   setAvailableIntegrations(integrations);
+      // }
+
+      // Load AI configs
+      const aiConfigsResponse = await fetch(`${API_URL}/ai-config`, {
+        headers: authHeader(),
+      });
+      if (aiConfigsResponse.ok) {
+        const config = await aiConfigsResponse.json();
+        // The endpoint returns a single config, wrap it in an array
+        setAvailableAiConfigs(config ? [config] : []);
+      }
+    } catch (error) {
+      console.error("Failed to load available resources:", error);
+    }
+  };
+
+  const assignDocument = async (documentId: string) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/documents/${documentId}`,
+        {
+          method: "POST",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      } else {
+        const error = await response.json();
+        alert(error.error);
+      }
+    } catch (error) {
+      console.error("Failed to assign document:", error);
+    }
+  };
+
+  const removeDocument = async (documentId: string) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/documents/${documentId}`,
+        {
+          method: "DELETE",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      }
+    } catch (error) {
+      console.error("Failed to remove document:", error);
+    }
+  };
+
+  const assignPhoneNumber = async (phoneNumberId: string) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/phone-numbers/${phoneNumberId}`,
+        {
+          method: "POST",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      } else {
+        const error = await response.json();
+        alert(error.error);
+      }
+    } catch (error) {
+      console.error("Failed to assign phone number:", error);
+    }
+  };
+
+  const removePhoneNumber = async (phoneNumberId: string) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/phone-numbers/${phoneNumberId}`,
+        {
+          method: "DELETE",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      }
+    } catch (error) {
+      console.error("Failed to remove phone number:", error);
+    }
+  };
+
+  const setAiConfig = async (aiConfigId: string) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/ai-config/${aiConfigId}`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      }
+    } catch (error) {
+      console.error("Failed to set AI config:", error);
+    }
+  };
+
+  const removeAiConfig = async () => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/ai-config`,
+        {
+          method: "DELETE",
+          headers: authHeader(),
+        }
+      );
+      if (response.ok) {
+        await loadWorkflowResources();
+      }
+    } catch (error) {
+      console.error("Failed to remove AI config:", error);
+    }
+  };
 
   // --- Logic ---
 
@@ -510,7 +737,7 @@ const Workflows: React.FC = () => {
       const newWorkflow = await api.workflows.create({
         name: "Untitled Workflow",
         description: "New workflow description",
-        triggerType: "Manual"
+        triggerType: "Manual",
       });
       setSelectedWorkflowMeta(newWorkflow);
       setNodes([]);
@@ -528,9 +755,9 @@ const Workflows: React.FC = () => {
 
   const handleSave = async () => {
     if (!selectedWorkflowMeta) return;
-    
+
     // Infer trigger type from the canvas
-    const triggerNode = nodes.find(n => n.type === 'trigger');
+    const triggerNode = nodes.find((n) => n.type === "trigger");
     const triggerType = triggerNode ? triggerNode.label : "Manual";
 
     try {
@@ -539,7 +766,7 @@ const Workflows: React.FC = () => {
         nodes,
         edges,
         triggerType,
-        isActive: true // Auto-activate for now so testing works immediately
+        isActive: true, // Auto-activate for now so testing works immediately
       });
       loadWorkflows();
       setView("list");
@@ -548,14 +775,107 @@ const Workflows: React.FC = () => {
     }
   };
 
+  const handleDeleteWorkflowClick = (workflow: Workflow) => {
+    setWorkflowToDelete(workflow);
+    setShowDeleteModal(true);
+  };
+
+  const handleDeleteWorkflowConfirm = async () => {
+    if (!workflowToDelete) return;
+
+    try {
+      await api.workflows.delete(workflowToDelete.id);
+      await loadWorkflows();
+      setShowDeleteModal(false);
+      setWorkflowToDelete(null);
+
+      // If we're in builder view with this workflow, go back to list
+      if (selectedWorkflowMeta?.id === workflowToDelete.id) {
+        setView("list");
+        setSelectedWorkflowMeta(null);
+      }
+    } catch (error) {
+      console.error("Failed to delete workflow:", error);
+      alert("Failed to delete workflow. Please try again.");
+    }
+  };
+
+  const handleDeleteWorkflowCancel = () => {
+    setShowDeleteModal(false);
+    setWorkflowToDelete(null);
+  };
+
+  const generateGreeting = async (nodeId: string) => {
+    setIsGeneratingGreeting(true);
+    try {
+      // Fetch the tenant's AI config
+      const response = await fetch(`${API_URL}/ai-config`, {
+        headers: authHeader(),
+      });
+
+      if (!response.ok) throw new Error("Failed to fetch AI config");
+
+      const aiConfig = await response.json();
+      const agentName = aiConfig.name || "Flo";
+      const businessDescription = aiConfig.businessDescription || "our company";
+
+      // Generate greeting using AI
+      const greetingResponse = await fetch(`${API_URL}/ai/generate-greeting`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({
+          agentName,
+          businessDescription,
+        }),
+      });
+
+      if (!greetingResponse.ok) {
+        // Fallback: create a simple greeting if API fails
+        const fallbackGreeting = `Hello! Thank you for calling ${businessDescription}. This is ${agentName}, your AI assistant. How may I help you today?`;
+        updateNode(nodeId, {
+          config: {
+            ...nodes.find((n) => n.id === nodeId)?.config,
+            greeting: fallbackGreeting,
+          },
+        });
+        return;
+      }
+
+      const { greeting } = await greetingResponse.json();
+
+      // Update the node with the generated greeting
+      updateNode(nodeId, {
+        config: {
+          ...nodes.find((n) => n.id === nodeId)?.config,
+          greeting,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to generate greeting:", error);
+      // Fallback greeting on error
+      const fallbackGreeting =
+        "Hello! Thank you for calling. How may I assist you today?";
+      updateNode(nodeId, {
+        config: {
+          ...nodes.find((n) => n.id === nodeId)?.config,
+          greeting: fallbackGreeting,
+        },
+      });
+    } finally {
+      setIsGeneratingGreeting(false);
+    }
+  };
+
   const handleSimulate = async () => {
     if (isSimulating || nodes.length === 0) return;
     setIsSimulating(true);
 
     // Trigger backend simulation
-    const triggerNode = nodes.find(n => n.type === 'trigger');
+    const triggerNode = nodes.find((n) => n.type === "trigger");
     if (triggerNode) {
-        api.workflows.simulate(triggerNode.label, { source: "simulator" }).catch(console.error);
+      api.workflows
+        .simulate(triggerNode.label, { source: "simulator" })
+        .catch(console.error);
     }
 
     // Simple linear simulation for demo visualization
@@ -809,7 +1129,7 @@ const Workflows: React.FC = () => {
                   Automate agent tasks and AI responses with visual flows.
                 </p>
               </div>
-              <button 
+              <button
                 onClick={handleNewWorkflow}
                 className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-sm"
               >
@@ -856,8 +1176,12 @@ const Workflows: React.FC = () => {
                     >
                       Open Builder
                     </button>
-                    <button className="p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-50">
-                      <MoreHorizontal size={20} />
+                    <button
+                      onClick={() => handleDeleteWorkflowClick(wf)}
+                      className="p-2 text-slate-400 hover:text-red-600 rounded-full hover:bg-red-50 transition-colors"
+                      title="Delete workflow"
+                    >
+                      <Trash2 size={18} />
                     </button>
                   </div>
                 </div>
@@ -918,7 +1242,7 @@ const Workflows: React.FC = () => {
                   </>
                 )}
               </button>
-              <button 
+              <button
                 onClick={handleSave}
                 className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50"
               >
@@ -1169,31 +1493,217 @@ const Workflows: React.FC = () => {
 
                   {/* Specific Configuration: Incoming Call */}
                   {selectedNode.label === "Incoming Call" && (
+                    <div className="pt-6 border-t border-slate-100 space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                          Select Phone Number
+                        </label>
+                        <select
+                          value={selectedNode.config?.phoneNumberId || ""}
+                          onChange={(e) =>
+                            updateNode(selectedNode.id, {
+                              config: {
+                                ...selectedNode.config,
+                                phoneNumberId: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                        >
+                          <option value="">Any / All Numbers</option>
+                          {ownedNumbers.map((num) => (
+                            <option key={num.id} value={num.id}>
+                              {num.friendlyName} ({num.number})
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Choose which inbound line triggers this flow.
+                        </p>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block text-xs font-bold text-slate-500 uppercase">
+                            Greeting Message
+                          </label>
+                          <button
+                            onClick={() => generateGreeting(selectedNode.id)}
+                            disabled={isGeneratingGreeting}
+                            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isGeneratingGreeting ? (
+                              <>
+                                <span className="w-2 h-2 bg-indigo-600 rounded-full animate-ping" />
+                                Generating...
+                              </>
+                            ) : (
+                              <>
+                                <Zap size={12} />
+                                Generate with AI
+                              </>
+                            )}
+                          </button>
+                        </div>
+                        <textarea
+                          rows={3}
+                          placeholder="Hello! Thank you for calling. How can I help you today?"
+                          value={selectedNode.config?.greeting || ""}
+                          onChange={(e) =>
+                            updateNode(selectedNode.id, {
+                              config: {
+                                ...selectedNode.config,
+                                greeting: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                        />
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          The AI will speak this greeting when the call is
+                          answered.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Specific Configuration: Knowledge Base */}
+                  {selectedNode.label === "Knowledge Base" && (
                     <div className="pt-6 border-t border-slate-100">
                       <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                        Select Phone Number
+                        Assigned Documents
+                        <span
+                          className={`ml-2 ${
+                            workflowResources.documents.length >=
+                            planLimits.maxDocumentsPerWorkflow
+                              ? "text-red-600"
+                              : workflowResources.documents.length >=
+                                planLimits.maxDocumentsPerWorkflow * 0.8
+                              ? "text-yellow-600"
+                              : "text-slate-400"
+                          }`}
+                        >
+                          ({workflowResources.documents.length} /{" "}
+                          {planLimits.maxDocumentsPerWorkflow})
+                        </span>
                       </label>
-                      <select
-                        value={selectedNode.config?.phoneNumberId || ""}
-                        onChange={(e) =>
-                          updateNode(selectedNode.id, {
-                            config: {
-                              ...selectedNode.config,
-                              phoneNumberId: e.target.value,
-                            },
-                          })
-                        }
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
-                      >
-                        <option value="">Any / All Numbers</option>
-                        {ownedNumbers.map((num) => (
-                          <option key={num.id} value={num.id}>
-                            {num.friendlyName} ({num.number})
-                          </option>
-                        ))}
-                      </select>
+
+                      {/* Assigned Documents List */}
+                      {workflowResources.documents.length > 0 && (
+                        <div className="space-y-2 mb-3">
+                          {workflowResources.documents.map((doc: any) => (
+                            <div
+                              key={doc.id}
+                              className="flex items-center justify-between p-2 bg-green-50 border border-green-200 rounded-lg"
+                            >
+                              <div className="flex items-center gap-2">
+                                <FileText
+                                  size={14}
+                                  className="text-green-600"
+                                />
+                                <span className="text-sm font-medium text-slate-700 truncate">
+                                  {doc.name}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => removeDocument(doc.id)}
+                                className="text-slate-400 hover:text-red-600"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Add Document Dropdown */}
+                      {workflowResources.documents.length <
+                        planLimits.maxDocumentsPerWorkflow && (
+                        <select
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              assignDocument(e.target.value);
+                              e.target.value = "";
+                            }
+                          }}
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                          <option value="">+ Assign Document</option>
+                          {availableDocuments
+                            .filter(
+                              (doc) =>
+                                !workflowResources.documents.find(
+                                  (d: any) => d.id === doc.id
+                                )
+                            )
+                            .map((doc) => (
+                              <option key={doc.id} value={doc.id}>
+                                {doc.name}
+                              </option>
+                            ))}
+                        </select>
+                      )}
+                      {workflowResources.documents.length >=
+                        planLimits.maxDocumentsPerWorkflow && (
+                        <p className="text-xs text-red-600 font-medium mt-2">
+                          Plan limit reached
+                        </p>
+                      )}
                       <p className="text-[10px] text-slate-400 mt-1">
-                        Choose which inbound line triggers this flow.
+                        AI will only search within assigned documents for this
+                        workflow.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Specific Configuration: AI Configuration */}
+                  {selectedNode.label === "AI Configuration" && (
+                    <div className="pt-6 border-t border-slate-100">
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                        AI Config Override
+                      </label>
+
+                      {/* Current AI Config */}
+                      {workflowResources.aiConfig && (
+                        <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Bot size={14} className="text-purple-600" />
+                              <span className="text-sm font-medium text-slate-700">
+                                {workflowResources.aiConfig.name}
+                              </span>
+                            </div>
+                            <button
+                              onClick={removeAiConfig}
+                              className="text-slate-400 hover:text-red-600"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Set AI Config Dropdown */}
+                      {!workflowResources.aiConfig && (
+                        <select
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              setAiConfig(e.target.value);
+                              e.target.value = "";
+                            }
+                          }}
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                          <option value="">+ Set AI Config</option>
+                          {availableAiConfigs.map((config) => (
+                            <option key={config.id} value={config.id}>
+                              {config.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        Override default AI settings for this workflow.
                       </p>
                     </div>
                   )}
@@ -1259,6 +1769,57 @@ const Workflows: React.FC = () => {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && workflowToDelete && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 animate-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-slate-200">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-100 rounded-lg">
+                  <Trash2 size={24} className="text-red-600" />
+                </div>
+                <h2 className="text-xl font-bold text-slate-900">
+                  Delete Workflow
+                </h2>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-slate-600">
+                Are you sure you want to delete{" "}
+                <span className="font-bold text-slate-900">
+                  "{workflowToDelete.name}"
+                </span>
+                ?
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <p className="text-sm text-red-800">
+                  <strong>Warning:</strong> This action cannot be undone. All
+                  workflow nodes, edges, and configurations will be permanently
+                  deleted.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-slate-200 flex items-center justify-end gap-3">
+              <button
+                onClick={handleDeleteWorkflowCancel}
+                className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteWorkflowConfirm}
+                className="px-4 py-2 text-sm font-bold text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors shadow-sm flex items-center gap-2"
+              >
+                <Trash2 size={16} />
+                Delete Workflow
+              </button>
+            </div>
           </div>
         </div>
       )}
