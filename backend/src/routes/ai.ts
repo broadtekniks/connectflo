@@ -59,4 +59,38 @@ router.post("/sentiment", async (req: Request, res: Response) => {
   }
 });
 
+router.post("/generate-greeting", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  try {
+    const { agentName, businessDescription } = req.body;
+
+    const prompt = `You are a professional greeting writer for AI voice assistants. 
+Create a warm, professional, and concise phone greeting (2-3 sentences maximum) for an AI assistant named "${agentName}" who works for ${businessDescription}.
+
+The greeting should:
+- Be natural and conversational
+- Welcome the caller warmly
+- Introduce the AI assistant by name
+- Briefly mention what they can help with
+- End with an open question to encourage the caller to speak
+
+Do not include quotation marks in your response. Just provide the greeting text itself.`;
+
+    const response = await aiService.generateResponse(
+      [{ role: "user", content: prompt }],
+      "",
+      undefined,
+      {
+        tenantId: authReq.user?.tenantId,
+        userId: authReq.user?.userId,
+      }
+    );
+
+    res.json({ greeting: response });
+  } catch (error) {
+    console.error("Failed to generate greeting:", error);
+    res.status(500).json({ error: "Failed to generate greeting" });
+  }
+});
+
 export default router;

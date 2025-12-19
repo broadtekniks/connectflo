@@ -94,6 +94,37 @@ router.put("/:id", async (req: Request, res: Response) => {
   }
 });
 
+// Delete workflow
+router.delete("/:id", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  try {
+    const { id } = req.params;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Verify ownership
+    const existing = await prisma.workflow.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Workflow not found" });
+    }
+
+    await prisma.workflow.delete({
+      where: { id },
+    });
+
+    res.json({ success: true, message: "Workflow deleted" });
+  } catch (error) {
+    console.error("Failed to delete workflow:", error);
+    res.status(500).json({ error: "Failed to delete workflow" });
+  }
+});
+
 // Simulate trigger
 router.post("/simulate", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;

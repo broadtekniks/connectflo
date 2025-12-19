@@ -29,6 +29,7 @@ export class WorkflowEngine {
       history: { role: "user" | "assistant" | "system"; content: string }[];
       workflowId?: string;
       tenantId?: string;
+      documentIds?: string[];
     }
   > = new Map();
 
@@ -42,11 +43,27 @@ export class WorkflowEngine {
    * Entry point for external events (Webhooks, API calls)
    */
   async trigger(triggerType: string, context: any) {
-    // Find the active workflow for this trigger type
+    // Find the active workflow for this trigger type and load assigned resources
     const workflow = await prisma.workflow.findFirst({
       where: {
         isActive: true,
         triggerType: triggerType,
+      },
+      include: {
+        aiConfig: true,
+        phoneNumbers: {
+          include: { phoneNumber: true },
+        },
+        documents: {
+          include: {
+            document: {
+              include: { chunks: true },
+            },
+          },
+        },
+        integrations: {
+          include: { integration: true },
+        },
       },
     });
 
@@ -57,6 +74,16 @@ export class WorkflowEngine {
     // Add workflow info to context for tenant tracking
     context.workflowId = workflow.id;
     context.workflowTenantId = workflow.tenantId;
+    context.workflowResources = {
+      aiConfig: (workflow as any).aiConfig,
+      phoneNumbers: (workflow as any).phoneNumbers.map(
+        (wp: any) => wp.phoneNumber
+      ),
+      documents: (workflow as any).documents.map((wd: any) => wd.document),
+      integrations: (workflow as any).integrations.map(
+        (wi: any) => wi.integration
+      ),
+    };
 
     // 2. Parse nodes and edges
     const nodes = workflow.nodes as unknown as WorkflowNode[];
@@ -84,11 +111,22 @@ export class WorkflowEngine {
         history: [],
         workflowId: workflow.id,
         tenantId: workflow.tenantId,
+        documentIds: (workflow as any).documents.map(
+          (wd: any) => wd.document.id
+        ),
       });
 
       await this.telnyxService.answerCall(context.callControlId);
-      // Start transcription to enable 2-way conversation
-      await this.telnyxService.startTranscription(context.callControlId);
+
+      // Speak the greeting if configured in the trigger node
+      const greeting = triggerNode.config?.greeting;
+      if (greeting) {
+        await this.telnyxService.speakText(context.callControlId, greeting);
+        // Transcription will be started when speak.ended event is received
+      } else {
+        // No greeting, start transcription immediately
+        await this.telnyxService.startTranscription(context.callControlId);
+      }
     }
 
     // 4. Start execution
@@ -229,7 +267,15 @@ export class WorkflowEngine {
         return;
       }
 
-      const relevantDocs = await this.kbService.search(transcript, tenantId);
+      // Get assigned document IDs from call state
+      const documentIds = callState.documentIds || [];
+
+      const relevantDocs = await this.kbService.search(
+        transcript,
+        tenantId,
+        10,
+        documentIds
+      );
       let kbContext = "";
       if (relevantDocs.length > 0) {
         kbContext = `Relevant Knowledge Base Info:\n${relevantDocs.join(
@@ -256,6 +302,29 @@ export class WorkflowEngine {
       await this.telnyxService.speakText(callControlId, response);
     } catch (error) {
       console.error("[WorkflowEngine] Error handling voice input:", error);
+    }
+  }
+
+  /**
+   * Handle speak.ended event - start transcription after greeting finishes
+   */
+  async handleSpeakEnded(callControlId: string) {
+    try {
+      const callState = this.activeCalls.get(callControlId);
+      if (!callState) {
+        console.warn(
+          `[WorkflowEngine] No call state found for ${callControlId}`
+        );
+        return;
+      }
+
+      // Start transcription now that greeting has finished
+      await this.telnyxService.startTranscription(callControlId);
+      console.log(
+        `[WorkflowEngine] Started transcription for ${callControlId} after greeting`
+      );
+    } catch (error) {
+      console.error("[WorkflowEngine] Error handling speak ended:", error);
     }
   }
 }

@@ -133,18 +133,27 @@ export class KnowledgeBaseService {
   async search(
     query: string,
     tenantId: string,
-    limit: number = 10
+    limit: number = 10,
+    documentIds?: string[]
   ): Promise<string[]> {
     try {
       const queryEmbedding = await this.aiService.getEmbeddings(query);
 
-      // Fetch chunks for this tenant
-      const allChunks = await (prisma as any).documentChunk.findMany({
-        where: {
-          document: {
-            tenantId: tenantId,
-          },
+      // Build the filter for chunks
+      const filter: any = {
+        document: {
+          tenantId: tenantId,
         },
+      };
+
+      // If documentIds provided, only search within those documents
+      if (documentIds && documentIds.length > 0) {
+        filter.documentId = { in: documentIds };
+      }
+
+      // Fetch chunks for this tenant (or specific documents)
+      const allChunks = await (prisma as any).documentChunk.findMany({
+        where: filter,
       });
 
       const scoredChunks = allChunks.map((chunk: any) => {

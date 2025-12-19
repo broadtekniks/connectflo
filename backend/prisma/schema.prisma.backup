@@ -129,7 +129,6 @@ model DocumentChunk {
   documentId String
   document   Document               @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
-
 model Integration {
   id          String   @id @default(uuid())
   name        String
@@ -142,8 +141,8 @@ model Integration {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   workflows   WorkflowIntegration[]
+} updatedAt   DateTime @updatedAt
 }
-
 model Workflow {
   id          String   @id @default(uuid())
   name        String
@@ -160,13 +159,6 @@ model Workflow {
   aiConfigId  String?
   aiConfig    AiConfig? @relation(fields: [aiConfigId], references: [id])
   phoneNumbers WorkflowPhoneNumber[]
-  documents    WorkflowDocument[]
-  integrations WorkflowIntegration[]
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
 model PhoneNumber {
   id             String   @id @default(uuid())
   number         String   @unique
@@ -198,6 +190,14 @@ model PhoneNumber {
   
   usageRecords   UsageRecord[]
   workflows      WorkflowPhoneNumber[]
+} // Assignment
+  assignedToId   String?
+  assignedTo     User?    @relation("AssignedUser", fields: [assignedToId], references: [id])
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  usageRecords   UsageRecord[]
 }
 
 model Tenant {
@@ -237,15 +237,6 @@ model PricingTier {
   name          String        // "Basic Local", "Premium Local", "Toll-Free", etc.
   description   String?
   wholesaleMin  Float         // Minimum Telnyx cost for this tier
-  wholesaleMax  Float         // Maximum Telnyx cost for this tier
-  retailPrice   Float         // What customers pay
-  priority      Int           @default(0) // Higher priority tiers checked first
-  isActive      Boolean       @default(true)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  phoneNumbers  PhoneNumber[]
-}
-
 model AiConfig {
   id               String   @id @default(uuid())
   tenantId         String   @unique
@@ -261,6 +252,15 @@ model AiConfig {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   workflows        Workflow[]
+} toneOfVoice      String   @default("Friendly & Casual")
+  businessDescription String? // Short description of the business for context
+  systemPrompt     String   @default("You are Flo, a helpful assistant.")
+  voiceId          String   @default("alloy")
+  speakingRate     Float    @default(1.0)
+  handoffThreshold Float    @default(0.7)
+  autoEscalate     Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 model UsageRecord {

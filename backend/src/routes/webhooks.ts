@@ -34,6 +34,9 @@ router.post("/telnyx", async (req: Request, res: Response) => {
         direction: payload.direction,
         raw: payload,
       });
+    } else if (eventType === "call.speak.ended") {
+      // When greeting finishes speaking, start transcription
+      await workflowEngine.handleSpeakEnded(payload.call_control_id);
     } else if (eventType === "call.transcription") {
       // Only process final transcripts to avoid interrupting the user mid-sentence
       // and to prevent spamming the AI service with partial results
