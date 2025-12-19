@@ -1,16 +1,16 @@
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions"]
+  previewFeatures = ["postgresqlExtensions", "driverAdapters"]
 }
 
 datasource db {
   provider   = "postgresql"
-  url        = env("DATABASE_URL")
   extensions = [vector]
 }
 
 enum Role {
-  ADMIN
+  SUPER_ADMIN
+  TENANT_ADMIN
   AGENT
   CUSTOMER
 }
@@ -41,18 +41,35 @@ enum Sentiment {
   NEGATIVE
 }
 
+enum UsageType {
+  VOICE_INBOUND
+  VOICE_OUTBOUND
+  SMS_INBOUND
+  SMS_OUTBOUND
+  MMS_INBOUND
+  MMS_OUTBOUND
+  AI_TOKENS_INPUT
+  AI_TOKENS_OUTPUT
+  AI_EMBEDDING
+  STORAGE_GB
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
+  password  String?  // Hashed password
   name      String
   avatar    String?
   role      Role     @default(CUSTOMER)
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
   assignedConversations Conversation[] @relation("AssignedAgent")
   conversations         Conversation[] @relation("Customer")
+  assignedPhoneNumbers  PhoneNumber[]  @relation("AssignedUser")
 }
 
 model Conversation {
@@ -63,6 +80,7 @@ model Conversation {
   priority     String             @default("MEDIUM") // LOW, MEDIUM, HIGH
   sentiment    Sentiment          @default(NEUTRAL)
   tags         String[]
+  tenantId     String             @default("default")
   lastActivity DateTime           @default(now())
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
@@ -73,6 +91,7 @@ model Conversation {
   assigneeId String?
   assignee   User?     @relation("AssignedAgent", fields: [assigneeId], references: [id])
   messages   Message[]
+  usageRecords UsageRecord[]
 }
 
 model Message {
@@ -85,20 +104,29 @@ model Message {
   
   // Relations
   conversationId String
-  conversation   Conversation  @relation(fields: [conversationId], references: [id])
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 }
 
 model Document {
-  id        String                 @id @default(uuid())
+  id        String          @id @default(uuid())
   name      String
-  type      String                 // pdf, docx, txt
+  type      String          // pdf, docx, txt
   size      Int
   url       String
-  status    String                 // INDEXED, PROCESSING, ERROR
-  content   String?                // Extracted text content
-  embedding Unsupported("vector")? // pgvector embedding
-  createdAt DateTime               @default(now())
-  updatedAt DateTime               @updatedAt
+  status    String          @default("PENDING") // PENDING, INDEXING, READY, ERROR
+  tenantId  String          @default("default")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  chunks    DocumentChunk[]
+}
+
+model DocumentChunk {
+  id         String                 @id @default(uuid())
+  content    String
+  // embedding  Unsupported("vector")? // Commented out to avoid pgvector dependency issues in this env
+  embeddingJson Json?               // Storing as JSON for compatibility
+  documentId String
+  document   Document               @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
 
 model Integration {
@@ -109,6 +137,7 @@ model Integration {
   description String
   category    String
   config      Json?
+  tenantId    String   @default("default")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
@@ -123,21 +152,137 @@ model Workflow {
   lastRun     DateTime?
   nodes       Json     // Storing nodes as JSON for flexibility
   edges       Json     // Storing edges as JSON for flexibility
+  tenantId    String   @default("default")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
 
 model PhoneNumber {
-  id           String   @id @default(uuid())
-  number       String   @unique
-  friendlyName String
-  country      String
-  region       String
-  type         String
-  capabilities Json     // { voice: boolean, sms: boolean, mms: boolean }
-  monthlyCost  Float
-  setupCost    Float?
-  status       String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id             String   @id @default(uuid())
+  number         String   @unique
+  friendlyName   String
+  country        String
+  region         String
+  type           String
+  capabilities   Json     // { voice: boolean, sms: boolean, mms: boolean }
+  
+  // Pricing fields
+  wholesaleCost  Float    // What Telnyx charges us
+  retailPrice    Float    // What customer pays
+  setupCost      Float?
+  pricingTierId  String?
+  pricingTier    PricingTier? @relation(fields: [pricingTierId], references: [id])
+  
+  // Legacy field (keep for backward compatibility)
+  monthlyCost    Float    @default(0)
+  
+  status         String
+  tenantId       String   @default("default")
+  
+  // Assignment
+  assignedToId   String?
+  assignedTo     User?    @relation("AssignedUser", fields: [assignedToId], references: [id])
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  usageRecords   UsageRecord[]
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("STARTER") // STARTER, PRO, ENTERPRISE
+  status    String   @default("ACTIVE") // ACTIVE, INACTIVE, PAST_DUE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
+  aiConfig  AiConfig?
+}
+
+model Plan {
+  id               String   @id @default(uuid())
+  name             String   @unique // STARTER, PRO, ENTERPRISE
+  documentLimit    Int      @default(5)
+  docSizeLimitMB   Int      @default(10) // Max size per file in MB
+  
+  // Phone number pricing
+  pricingDiscount  Float    @default(0.0)  // 0.0 = no discount, 0.10 = 10% off tier prices
+  fallbackMarkup   Float    @default(0.50) // 50% markup for numbers outside tiers
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model PricingTier {
+  id            String        @id @default(uuid())
+  name          String        // "Basic Local", "Premium Local", "Toll-Free", etc.
+  description   String?
+  wholesaleMin  Float         // Minimum Telnyx cost for this tier
+  wholesaleMax  Float         // Maximum Telnyx cost for this tier
+  retailPrice   Float         // What customers pay
+  priority      Int           @default(0) // Higher priority tiers checked first
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  phoneNumbers  PhoneNumber[]
+}
+
+model AiConfig {
+  id               String   @id @default(uuid())
+  tenantId         String   @unique
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  name             String   @default("Flo")
+  toneOfVoice      String   @default("Friendly & Casual")
+  businessDescription String? // Short description of the business for context
+  systemPrompt     String   @default("You are Flo, a helpful assistant.")
+  voiceId          String   @default("alloy")
+  speakingRate     Float    @default(1.0)
+  handoffThreshold Float    @default(0.7)
+  autoEscalate     Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model UsageRecord {
+  id              String       @id @default(uuid())
+  tenantId        String
+  userId          String?
+  
+  type            UsageType
+  
+  // Voice-specific
+  phoneNumberId   String?
+  phoneNumber     PhoneNumber? @relation(fields: [phoneNumberId], references: [id])
+  callSid         String?      // Telnyx call ID
+  durationSeconds Int?         // Call duration
+  
+  // AI-specific
+  model           String?      // e.g., "gpt-4", "text-embedding-ada-002"
+  inputTokens     Int?
+  outputTokens    Int?
+  totalTokens     Int?
+  
+  // SMS-specific
+  messageCount    Int?         // Number of SMS segments
+  messageId       String?      // Telnyx message ID
+  
+  // Pricing
+  wholesaleCost   Float        // What you paid (Telnyx/OpenAI)
+  retailCost      Float        // What customer is charged
+  markup          Float        // Your margin
+  
+  // Context
+  conversationId  String?
+  conversation    Conversation? @relation(fields: [conversationId], references: [id])
+  
+  metadata        Json?        // Flexible field for extra data
+  
+  createdAt       DateTime     @default(now())
+  
+  @@index([tenantId, createdAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([conversationId])
 }

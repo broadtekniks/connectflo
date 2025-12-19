@@ -1,4 +1,5 @@
 const Telnyx = require("telnyx");
+const axios = require("axios");
 
 const apiKey = process.env.TELNYX_API_KEY;
 
@@ -34,10 +35,6 @@ export class TelnyxService {
       }
 
       const availableNumbers = await telnyx.availablePhoneNumbers.list(params);
-      console.log(
-        "Telnyx Available Numbers:",
-        JSON.stringify(availableNumbers.data, null, 2)
-      );
       return availableNumbers.data;
     } catch (error) {
       console.error("Telnyx Search Error:", error);
@@ -111,7 +108,6 @@ export class TelnyxService {
             webhook_event_url: webhookUrl,
             webhook_event_failover_url: webhookUrl,
           });
-          console.log(`Updated Telnyx App Webhook URL to: ${webhookUrl}`);
         }
         return existingApp;
       }
@@ -160,7 +156,6 @@ export class TelnyxService {
           language: "en",
         },
       });
-      console.log(`Started transcription for call ${callControlId}`);
     } catch (error) {
       console.error("Failed to start transcription:", error);
     }
@@ -170,9 +165,98 @@ export class TelnyxService {
     if (!telnyx) return;
     try {
       await telnyx.calls.actions.stopTranscription(callControlId);
-      console.log(`Stopped transcription for call ${callControlId}`);
     } catch (error) {
       console.error("Failed to stop transcription:", error);
+    }
+  }
+
+  async listOwnedNumbers() {
+    if (!telnyx) throw new Error("Telnyx API key not configured");
+
+    try {
+      const response = await telnyx.phoneNumbers.list();
+      return response.data;
+    } catch (error) {
+      console.error("Failed to list Telnyx numbers:", error);
+      throw error;
+    }
+  }
+
+  async getNumberDetails(phoneNumber: string) {
+    if (!telnyx) throw new Error("Telnyx API key not configured");
+
+    try {
+      const numbers = await telnyx.phoneNumbers.list({
+        filter: { phone_number: phoneNumber },
+      });
+
+      if (numbers.data && numbers.data.length > 0) {
+        return numbers.data[0];
+      }
+      return null;
+    } catch (error) {
+      console.error("Failed to get number details:", error);
+      throw error;
+    }
+  }
+
+  async makeTestCall(fromNumber: string, toNumber: string) {
+    if (!apiKey) throw new Error("Telnyx API key not configured");
+
+    try {
+      // Use direct REST API call for voice calls
+      const response = await axios.post(
+        "https://api.telnyx.com/v2/calls",
+        {
+          connection_id: process.env.TELNYX_CONNECTION_ID,
+          to: toNumber,
+          from: fromNumber,
+          webhook_url:
+            process.env.TELNYX_WEBHOOK_URL ||
+            "http://localhost:3002/webhooks/telnyx",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      return response.data;
+    } catch (error: any) {
+      throw error;
+    }
+  }
+
+  async sendTestSMS(fromNumber: string, toNumber: string, message: string) {
+    if (!apiKey) throw new Error("Telnyx API key not configured");
+
+    try {
+      // Use direct REST API call since SDK methods vary
+      // Note: Telnyx requires messaging_profile_id for SMS
+      const response = await axios.post(
+        "https://api.telnyx.com/v2/messages",
+        {
+          from: fromNumber,
+          to: toNumber,
+          text: message,
+          messaging_profile_id: process.env.TELNYX_MESSAGING_PROFILE_ID,
+          webhook_url:
+            process.env.TELNYX_WEBHOOK_URL ||
+            "http://localhost:3002/webhooks/telnyx",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      return response.data;
+    } catch (error: any) {
+      throw error;
     }
   }
 }

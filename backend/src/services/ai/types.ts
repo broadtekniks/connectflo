@@ -1,7 +1,9 @@
 export interface AIService {
   generateResponse(
     messages: { role: "user" | "assistant" | "system"; content: string }[],
-    context?: string
+    context?: string,
+    systemPrompt?: string
   ): Promise<string>;
   analyzeSentiment(text: string): Promise<"POSITIVE" | "NEUTRAL" | "NEGATIVE">;
+  getEmbeddings(text: string): Promise<number[]>;
 }

@@ -12,8 +12,6 @@ router.post("/telnyx", async (req: Request, res: Response) => {
     const eventType = event.data?.event_type;
     const payload = event.data?.payload;
 
-    console.log(`[Webhook] Received Telnyx event: ${eventType}`);
-
     if (eventType === "message.received") {
       // Trigger "Incoming Message" workflow
       // Payload structure: https://developers.telnyx.com/docs/api/v2/messaging/Message-Object
@@ -37,11 +35,6 @@ router.post("/telnyx", async (req: Request, res: Response) => {
         raw: payload,
       });
     } else if (eventType === "call.transcription") {
-      console.log(
-        "[Webhook] Transcription payload:",
-        JSON.stringify(payload.transcription_data, null, 2)
-      );
-
       // Only process final transcripts to avoid interrupting the user mid-sentence
       // and to prevent spamming the AI service with partial results
       if (payload.transcription_data?.transcript) {

@@ -1,14 +1,22 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { WorkflowEngine } from "../services/workflowEngine";
+import { AuthRequest } from "../middleware/auth";
 
 const router = Router();
 const workflowEngine = new WorkflowEngine();
 
 // Get all workflows
 router.get("/", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
+    const tenantId = authReq.user?.tenantId;
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
     const workflows = await prisma.workflow.findMany({
+      where: { tenantId },
       orderBy: { updatedAt: "desc" },
     });
     res.json(workflows);
@@ -20,8 +28,15 @@ router.get("/", async (req: Request, res: Response) => {
 
 // Create new workflow
 router.post("/", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { name, description, triggerType } = req.body;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
     const workflow = await prisma.workflow.create({
       data: {
         name: name || "Untitled Workflow",
@@ -30,6 +45,7 @@ router.post("/", async (req: Request, res: Response) => {
         nodes: [],
         edges: [],
         isActive: false,
+        tenantId,
       },
     });
     res.json(workflow);
@@ -41,9 +57,24 @@ router.post("/", async (req: Request, res: Response) => {
 
 // Update workflow (Save)
 router.put("/:id", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { id } = req.params;
     const { nodes, edges, name, description, isActive, triggerType } = req.body;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Verify ownership
+    const existing = await prisma.workflow.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Workflow not found" });
+    }
 
     const workflow = await prisma.workflow.update({
       where: { id },
@@ -65,12 +96,20 @@ router.put("/:id", async (req: Request, res: Response) => {
 
 // Simulate trigger
 router.post("/simulate", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { triggerType, context } = req.body;
-    console.log("Simulating workflow trigger:", triggerType);
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Add tenantId to context for tenant-aware execution
+    const enhancedContext = { ...context, tenantId };
 
     // Fire and forget - don't wait for full execution
-    workflowEngine.trigger(triggerType, context).catch((err) => {
+    workflowEngine.trigger(triggerType, enhancedContext).catch((err) => {
       console.error("Async simulation error:", err);
     });
 

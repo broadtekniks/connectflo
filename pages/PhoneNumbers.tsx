@@ -13,9 +13,11 @@ import {
   Loader2,
   LayoutGrid,
   List as ListIcon,
+  RefreshCw,
 } from "lucide-react";
 import { PhoneNumber } from "../types";
 import { api } from "../services/api";
+import AlertModal from "../components/AlertModal";
 
 const formatPhoneNumber = (phoneNumber: string) => {
   try {
@@ -45,19 +47,175 @@ const PhoneNumbers: React.FC = () => {
   const [ownedNumbers, setOwnedNumbers] = useState<PhoneNumber[]>([]);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [showTenantModal, setShowTenantModal] = useState(false);
+  const [selectedNumberForTenant, setSelectedNumberForTenant] =
+    useState<PhoneNumber | null>(null);
+  const [showTestModal, setShowTestModal] = useState(false);
+  const [testType, setTestType] = useState<"call" | "sms">("call");
+  const [selectedNumberForTest, setSelectedNumberForTest] =
+    useState<PhoneNumber | null>(null);
+  const [testDestination, setTestDestination] = useState("");
+  const [testMessage, setTestMessage] = useState(
+    "This is a test message from ConnectFlo"
+  );
+  const [isTesting, setIsTesting] = useState(false);
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    type: "success" | "error" | "info";
+  }>({ isOpen: false, title: "", message: "", type: "info" });
+
+  // Get user role from localStorage
+  let isSuperAdmin = false;
+  try {
+    const userStr = localStorage.getItem("user");
+    if (userStr) {
+      const user = JSON.parse(userStr);
+      isSuperAdmin = user?.role === "SUPER_ADMIN";
+      console.log("User role:", user?.role, "isSuperAdmin:", isSuperAdmin);
+    }
+  } catch (error) {
+    console.error("Failed to parse user from localStorage:", error);
+  }
 
   useEffect(() => {
     loadOwnedNumbers();
+    if (isSuperAdmin) {
+      loadTenants();
+    }
   }, []);
 
   const loadOwnedNumbers = async () => {
     try {
       const numbers = await api.phoneNumbers.list();
       setOwnedNumbers(numbers);
+
+      // Auto-update regions if any numbers have Unknown or US as region
+      const needsUpdate = numbers.some(
+        (num) => num.region === "Unknown" || num.region === "US"
+      );
+
+      if (needsUpdate && process.env.NODE_ENV !== "development") {
+        // Silently update regions in the background
+        api.phoneNumbers
+          .updateRegions()
+          .then(() => {
+            // Reload numbers after update
+            return api.phoneNumbers.list();
+          })
+          .then((updatedNumbers) => {
+            setOwnedNumbers(updatedNumbers);
+          })
+          .catch((err) => console.error("Failed to auto-update regions:", err));
+      }
     } catch (error) {
       console.error("Failed to load numbers:", error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadTenants = async () => {
+    try {
+      const tenantsData = await api.tenants.list();
+      setTenants(tenantsData);
+    } catch (error) {
+      console.error("Failed to load tenants:", error);
+    }
+  };
+
+  const handleAssignToTenant = async (tenantId: string) => {
+    if (!selectedNumberForTenant) return;
+
+    try {
+      await api.phoneNumbers.assignToTenant(
+        selectedNumberForTenant.id,
+        tenantId
+      );
+      await loadOwnedNumbers();
+      setShowTenantModal(false);
+      setSelectedNumberForTenant(null);
+      setModalState({
+        isOpen: true,
+        title: "Success",
+        message: "Phone number assigned to tenant successfully",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to assign to tenant:", error);
+      setModalState({
+        isOpen: true,
+        title: "Assignment Failed",
+        message: "Failed to assign phone number to tenant",
+        type: "error",
+      });
+    }
+  };
+
+  const handleTestCapability = async () => {
+    if (!selectedNumberForTest || !testDestination) {
+      setModalState({
+        isOpen: true,
+        title: "Validation Error",
+        message: "Please enter a destination number",
+        type: "error",
+      });
+      return;
+    }
+
+    setIsTesting(true);
+    try {
+      if (testType === "call") {
+        await api.phoneNumbers.testCall(
+          selectedNumberForTest.id,
+          testDestination
+        );
+        setModalState({
+          isOpen: true,
+          title: "Call Initiated",
+          message: `Test call from ${selectedNumberForTest.number} to ${testDestination} has been initiated`,
+          type: "success",
+        });
+      } else {
+        if (!testMessage) {
+          setModalState({
+            isOpen: true,
+            title: "Validation Error",
+            message: "Please enter a message",
+            type: "error",
+          });
+          return;
+        }
+        await api.phoneNumbers.testSMS(
+          selectedNumberForTest.id,
+          testDestination,
+          testMessage
+        );
+        setModalState({
+          isOpen: true,
+          title: "SMS Sent",
+          message: `Test SMS from ${selectedNumberForTest.number} to ${testDestination} has been sent`,
+          type: "success",
+        });
+      }
+      setShowTestModal(false);
+      setSelectedNumberForTest(null);
+      setTestDestination("");
+    } catch (error) {
+      console.error("Failed to test capability:", error);
+      setModalState({
+        isOpen: true,
+        title: "Test Failed",
+        message: `Failed to ${
+          testType === "call" ? "initiate call" : "send SMS"
+        }`,
+        type: "error",
+      });
+    } finally {
+      setIsTesting(false);
     }
   };
 
@@ -130,6 +288,31 @@ const PhoneNumbers: React.FC = () => {
     }
   };
 
+  const handleSync = async () => {
+    setIsSyncing(true);
+    try {
+      const result = await api.phoneNumbers.sync();
+      await loadOwnedNumbers();
+      setModalState({
+        isOpen: true,
+        title: "Sync Successful",
+        message: `Synced ${result.synced} numbers from Telnyx. ${result.skipped} numbers were already in the database.`,
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Sync failed:", error);
+      setModalState({
+        isOpen: true,
+        title: "Sync Failed",
+        message:
+          "Failed to sync numbers from Telnyx. Please check your API configuration.",
+        type: "error",
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   return (
     <div className="flex-1 bg-slate-50 p-8 overflow-y-auto h-full">
       <div className="max-w-5xl mx-auto">
@@ -143,7 +326,20 @@ const PhoneNumbers: React.FC = () => {
                 Manage your inbound lines and purchase new numbers via Telnyx.
               </p>
             </div>
-            <div className="flex gap-4">
+            <div className="flex gap-2 items-center">
+              <button
+                onClick={handleSync}
+                disabled={isSyncing}
+                className="px-3 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg text-sm font-medium hover:bg-slate-50 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Sync numbers from Telnyx"
+              >
+                <RefreshCw
+                  size={14}
+                  className={isSyncing ? "animate-spin" : ""}
+                />
+                {isSyncing ? "Syncing..." : "Sync Numbers"}
+              </button>
+
               {/* View Toggle */}
               <div className="flex gap-1 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
                 <button
@@ -205,6 +401,9 @@ const PhoneNumbers: React.FC = () => {
                   <tr>
                     <th className="px-6 py-3 font-semibold">Number</th>
                     <th className="px-6 py-3 font-semibold">Region</th>
+                    {isSuperAdmin && (
+                      <th className="px-6 py-3 font-semibold">Tenant</th>
+                    )}
                     <th className="px-6 py-3 font-semibold">Capabilities</th>
                     <th className="px-6 py-3 font-semibold">Cost / Month</th>
                     <th className="px-6 py-3 font-semibold text-right">
@@ -239,10 +438,27 @@ const PhoneNumbers: React.FC = () => {
                             src={`https://flagcdn.com/w20/${num.country.toLowerCase()}.png`}
                             alt={num.country}
                             className="w-4 rounded-sm"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display =
+                                "none";
+                            }}
                           />
-                          {num.region}
+                          {num.region && num.region !== "Unknown"
+                            ? num.region
+                            : num.country}
                         </div>
                       </td>
+                      {isSuperAdmin && (
+                        <td className="px-6 py-4 text-slate-600">
+                          <div
+                            className="inline-block cursor-help"
+                            title={`Tenant ID: ${num.tenantId}`}
+                          >
+                            {tenants.find((t) => t.id === num.tenantId)?.name ||
+                              "Unknown Tenant"}
+                          </div>
+                        </td>
+                      )}
                       <td className="px-6 py-4">
                         <div className="flex gap-2">
                           {num.capabilities.voice && (
@@ -275,9 +491,48 @@ const PhoneNumbers: React.FC = () => {
                         ${num.monthlyCost.toFixed(2)}
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <button className="text-slate-500 hover:text-indigo-600 px-3 py-1.5 rounded border border-slate-200 hover:border-indigo-200 text-xs font-medium transition-colors">
-                          Configure Flow
-                        </button>
+                        <div className="flex justify-end gap-2">
+                          {num.capabilities.voice && (
+                            <button
+                              onClick={() => {
+                                setSelectedNumberForTest(num);
+                                setTestType("call");
+                                setShowTestModal(true);
+                              }}
+                              className="text-purple-600 hover:text-purple-700 px-3 py-1.5 rounded border border-purple-200 hover:border-purple-300 text-xs font-medium transition-colors"
+                              title="Test Voice Call"
+                            >
+                              Test Call
+                            </button>
+                          )}
+                          {num.capabilities.sms && (
+                            <button
+                              onClick={() => {
+                                setSelectedNumberForTest(num);
+                                setTestType("sms");
+                                setShowTestModal(true);
+                              }}
+                              className="text-green-600 hover:text-green-700 px-3 py-1.5 rounded border border-green-200 hover:border-green-300 text-xs font-medium transition-colors"
+                              title="Test SMS"
+                            >
+                              Test SMS
+                            </button>
+                          )}
+                          {isSuperAdmin && (
+                            <button
+                              onClick={() => {
+                                setSelectedNumberForTenant(num);
+                                setShowTenantModal(true);
+                              }}
+                              className="text-indigo-600 hover:text-indigo-700 px-3 py-1.5 rounded border border-indigo-200 hover:border-indigo-300 text-xs font-medium transition-colors"
+                            >
+                              Assign Tenant
+                            </button>
+                          )}
+                          <button className="text-slate-500 hover:text-indigo-600 px-3 py-1.5 rounded border border-slate-200 hover:border-indigo-200 text-xs font-medium transition-colors">
+                            Configure Flow
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -313,9 +568,24 @@ const PhoneNumbers: React.FC = () => {
                       src={`https://flagcdn.com/w20/${num.country.toLowerCase()}.png`}
                       alt={num.country}
                       className="w-4 rounded-sm"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = "none";
+                      }}
                     />
-                    {num.region}
+                    {num.region && num.region !== "Unknown"
+                      ? num.region
+                      : num.country}
                   </p>
+                  {isSuperAdmin && (
+                    <p
+                      className="text-sm text-slate-600 mb-4 cursor-help"
+                      title={`Tenant ID: ${num.tenantId}`}
+                    >
+                      <span className="font-medium">Tenant:</span>{" "}
+                      {tenants.find((t) => t.id === num.tenantId)?.name ||
+                        "Unknown Tenant"}
+                    </p>
+                  )}
                   <div className="flex gap-2 mb-6">
                     {num.capabilities.voice && (
                       <span className="px-2 py-1 bg-purple-50 text-purple-700 text-xs font-bold rounded border border-purple-100">
@@ -333,9 +603,50 @@ const PhoneNumbers: React.FC = () => {
                       </span>
                     )}
                   </div>
-                  <button className="w-full py-2 border border-slate-200 text-slate-600 rounded-lg font-bold hover:bg-slate-50 hover:text-slate-900 transition-all">
-                    Configure Flow
-                  </button>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex gap-2">
+                      {num.capabilities.voice && (
+                        <button
+                          onClick={() => {
+                            setSelectedNumberForTest(num);
+                            setTestType("call");
+                            setShowTestModal(true);
+                          }}
+                          className="flex-1 py-2 border border-purple-200 text-purple-600 rounded-lg font-bold hover:bg-purple-50 transition-all text-sm"
+                        >
+                          Test Call
+                        </button>
+                      )}
+                      {num.capabilities.sms && (
+                        <button
+                          onClick={() => {
+                            setSelectedNumberForTest(num);
+                            setTestType("sms");
+                            setShowTestModal(true);
+                          }}
+                          className="flex-1 py-2 border border-green-200 text-green-600 rounded-lg font-bold hover:bg-green-50 transition-all text-sm"
+                        >
+                          Test SMS
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      {isSuperAdmin && (
+                        <button
+                          onClick={() => {
+                            setSelectedNumberForTenant(num);
+                            setShowTenantModal(true);
+                          }}
+                          className="flex-1 py-2 border border-indigo-200 text-indigo-600 rounded-lg font-bold hover:bg-indigo-50 transition-all"
+                        >
+                          Assign Tenant
+                        </button>
+                      )}
+                      <button className="flex-1 py-2 border border-slate-200 text-slate-600 rounded-lg font-bold hover:bg-slate-50 hover:text-slate-900 transition-all text-sm">
+                        Configure Flow
+                      </button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -587,6 +898,137 @@ const PhoneNumbers: React.FC = () => {
           </div>
         )}
       </div>
+      <AlertModal
+        isOpen={modalState.isOpen}
+        title={modalState.title}
+        message={modalState.message}
+        type={modalState.type}
+        onClose={() => setModalState({ ...modalState, isOpen: false })}
+      />
+
+      {/* Tenant Assignment Modal */}
+      {showTenantModal && selectedNumberForTenant && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4">
+            <div className="p-6 border-b border-slate-200">
+              <h3 className="text-xl font-bold text-slate-900">
+                Assign to Tenant
+              </h3>
+              <p className="text-slate-500 mt-1">
+                {formatPhoneNumber(selectedNumberForTenant.number)}
+              </p>
+            </div>
+            <div className="p-6 max-h-96 overflow-y-auto">
+              <div className="space-y-2">
+                {tenants.map((tenant) => (
+                  <button
+                    key={tenant.id}
+                    onClick={() => handleAssignToTenant(tenant.id)}
+                    className={`w-full text-left p-4 rounded-lg border-2 transition-all hover:border-indigo-500 hover:bg-indigo-50 ${
+                      selectedNumberForTenant.tenantId === tenant.id
+                        ? "border-indigo-500 bg-indigo-50"
+                        : "border-slate-200"
+                    }`}
+                  >
+                    <div className="font-semibold text-slate-900">
+                      {tenant.name}
+                    </div>
+                    <div className="text-sm text-slate-500 mt-1">
+                      Plan: {tenant.plan} • Status: {tenant.status}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="p-6 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowTenantModal(false);
+                  setSelectedNumberForTenant(null);
+                }}
+                className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Test Capability Modal */}
+      {showTestModal && selectedNumberForTest && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4">
+            <div className="p-6 border-b border-slate-200">
+              <h3 className="text-xl font-bold text-slate-900">
+                Test {testType === "call" ? "Voice Call" : "SMS"}
+              </h3>
+              <p className="text-slate-500 mt-1">
+                From: {formatPhoneNumber(selectedNumberForTest.number)}
+              </p>
+            </div>
+            <div className="p-6">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Destination Number
+                  </label>
+                  <input
+                    type="tel"
+                    value={testDestination}
+                    onChange={(e) => setTestDestination(e.target.value)}
+                    placeholder="+1 (555) 123-4567"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">
+                    Enter the phone number to test with (include country code)
+                  </p>
+                </div>
+                {testType === "sms" && (
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">
+                      Message
+                    </label>
+                    <textarea
+                      value={testMessage}
+                      onChange={(e) => setTestMessage(e.target.value)}
+                      rows={3}
+                      className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="p-6 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowTestModal(false);
+                  setSelectedNumberForTest(null);
+                  setTestDestination("");
+                }}
+                className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
+                disabled={isTesting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleTestCapability}
+                disabled={isTesting}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {isTesting ? (
+                  <>
+                    <Loader2 className="animate-spin" size={16} />
+                    {testType === "call" ? "Calling..." : "Sending..."}
+                  </>
+                ) : (
+                  <>{testType === "call" ? "Make Call" : "Send SMS"}</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

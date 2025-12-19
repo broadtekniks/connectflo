@@ -1,15 +1,22 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { ConversationStatus, ChannelType, Sentiment } from "@prisma/client";
+import { AuthRequest } from "../middleware/auth";
 
 const router = Router();
 
 // Get all conversations
 router.get("/", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { status, assigneeId } = req.query;
+    const tenantId = authReq.user?.tenantId;
 
-    const where: any = {};
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    const where: any = { tenantId };
     if (status) where.status = status as ConversationStatus;
     if (assigneeId) where.assigneeId = assigneeId as string;
 
@@ -30,9 +37,9 @@ router.get("/", async (req: Request, res: Response) => {
       },
     });
 
-    const formattedConversations = conversations.map((conv) => ({
+    const formattedConversations = conversations.map((conv: any) => ({
       ...conv,
-      messages: conv.messages.map((msg) => ({
+      messages: conv.messages.map((msg: any) => ({
         ...msg,
         timestamp: msg.createdAt.toISOString(),
       })),
@@ -47,10 +54,17 @@ router.get("/", async (req: Request, res: Response) => {
 
 // Get single conversation
 router.get("/:id", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { id } = req.params;
-    const conversation = await prisma.conversation.findUnique({
-      where: { id },
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id, tenantId },
       include: {
         customer: true,
         assignee: true,
@@ -68,7 +82,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
     const formattedConversation = {
       ...conversation,
-      messages: conversation.messages.map((msg) => ({
+      messages: conversation.messages.map((msg: any) => ({
         ...msg,
         timestamp: msg.createdAt.toISOString(),
       })),
@@ -83,14 +97,30 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // Create conversation
 router.post("/", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { customerId, channel, subject, initialMessage } = req.body;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Fetch customer to get tenantId and verify it matches
+    const customer = await prisma.user.findFirst({
+      where: { id: customerId, tenantId },
+    });
+
+    if (!customer) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
 
     // Start a transaction to create conversation and initial message
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx: any) => {
       const conversation = await tx.conversation.create({
         data: {
           customerId,
+          tenantId,
           channel: channel as ChannelType,
           subject,
           status: ConversationStatus.OPEN,
@@ -125,7 +155,7 @@ router.post("/", async (req: Request, res: Response) => {
 
     const formattedConversation = {
       ...fullConversation,
-      messages: fullConversation.messages.map((msg) => ({
+      messages: fullConversation.messages.map((msg: any) => ({
         ...msg,
         timestamp: msg.createdAt.toISOString(),
       })),
@@ -140,9 +170,24 @@ router.post("/", async (req: Request, res: Response) => {
 
 // Update conversation
 router.patch("/:id", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
   try {
     const { id } = req.params;
     const { status, assigneeId, priority, sentiment, tags } = req.body;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Verify ownership
+    const existing = await prisma.conversation.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
 
     const conversation = await prisma.conversation.update({
       where: { id },
@@ -163,6 +208,37 @@ router.patch("/:id", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error updating conversation:", error);
     res.status(500).json({ error: "Failed to update conversation" });
+  }
+});
+
+// Delete conversation
+router.delete("/:id", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  try {
+    const { id } = req.params;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    // Verify ownership
+    const existing = await prisma.conversation.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    await prisma.conversation.delete({
+      where: { id },
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting conversation:", error);
+    res.status(500).json({ error: "Failed to delete conversation" });
   }
 });
 

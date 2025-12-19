@@ -12,6 +12,14 @@ import aiRoutes from "./routes/ai";
 import phoneNumberRoutes from "./routes/phoneNumbers";
 import webhookRoutes from "./routes/webhooks";
 import workflowRoutes from "./routes/workflows";
+import knowledgeBaseRoutes from "./routes/knowledgeBase";
+import tenantRoutes from "./routes/tenants";
+import aiConfigRoutes from "./routes/ai-config";
+import authRoutes from "./routes/auth";
+import metricsRoutes from "./routes/metrics";
+import planRoutes from "./routes/plans";
+import usageRoutes from "./routes/usage";
+import { authenticateToken } from "./middleware/auth";
 
 const app = express();
 const port = process.env.PORT || 3002;
@@ -30,11 +38,18 @@ const io = new Server(httpServer, {
 // Make io accessible to routes
 app.set("io", io);
 
-app.use("/api/conversations", conversationRoutes);
-app.use("/api/messages", messageRoutes);
-app.use("/api/ai", aiRoutes);
-app.use("/api/phone-numbers", phoneNumberRoutes);
-app.use("/api/workflows", workflowRoutes);
+app.use("/api/conversations", authenticateToken, conversationRoutes);
+app.use("/api/messages", authenticateToken, messageRoutes);
+app.use("/api/ai", authenticateToken, aiRoutes);
+app.use("/api/phone-numbers", authenticateToken, phoneNumberRoutes);
+app.use("/api/workflows", authenticateToken, workflowRoutes);
+app.use("/api/knowledge-base", authenticateToken, knowledgeBaseRoutes);
+app.use("/api/tenants", authenticateToken, tenantRoutes);
+app.use("/api/ai-config", authenticateToken, aiConfigRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/metrics", authenticateToken, metricsRoutes);
+app.use("/api/plans", authenticateToken, planRoutes);
+app.use("/api/usage", authenticateToken, usageRoutes);
 app.use("/webhooks", webhookRoutes);
 
 io.on("connection", (socket) => {

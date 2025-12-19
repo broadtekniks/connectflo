@@ -2,8 +2,14 @@ import React, { useState, useEffect } from "react";
 import ConversationList from "../components/inbox/ConversationList";
 import ChatArea from "../components/inbox/ChatArea";
 import CustomerPanel from "../components/inbox/CustomerPanel";
-import { CURRENT_USER } from "../constants";
-import { MessageSender, Message, Conversation } from "../types";
+import ConfirmationModal from "../components/ConfirmationModal";
+import {
+  MessageSender,
+  Message,
+  Conversation,
+  User,
+  ConversationStatus,
+} from "../types";
 import { api } from "../services/api";
 import { socketService } from "../services/socket";
 
@@ -11,6 +17,18 @@ const Inbox: React.FC = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    type: "ARCHIVE" | "DELETE";
+    id: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const userStr = localStorage.getItem("user");
+    if (userStr) {
+      setCurrentUser(JSON.parse(userStr));
+    }
+  }, []);
 
   useEffect(() => {
     socketService.connect();
@@ -43,6 +61,18 @@ const Inbox: React.FC = () => {
   useEffect(() => {
     if (selectedId) {
       socketService.joinConversation(selectedId);
+
+      // Fetch full conversation history
+      api.conversations
+        .get(selectedId)
+        .then((fullConv) => {
+          setConversations((prev) =>
+            prev.map((c) => (c.id === selectedId ? fullConv : c))
+          );
+        })
+        .catch((err) =>
+          console.error("Failed to fetch full conversation", err)
+        );
     }
   }, [selectedId]);
 
@@ -78,6 +108,34 @@ const Inbox: React.FC = () => {
     }
   };
 
+  const executeAction = async () => {
+    if (!confirmAction) return;
+
+    const { type, id } = confirmAction;
+
+    try {
+      if (type === "ARCHIVE") {
+        await api.conversations.update(id, {
+          status: ConversationStatus.RESOLVED,
+        });
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === id ? { ...c, status: ConversationStatus.RESOLVED } : c
+          )
+        );
+      } else {
+        await api.conversations.delete(id);
+        setConversations((prev) => prev.filter((c) => c.id !== id));
+      }
+
+      if (selectedId === id) setSelectedId(null);
+    } catch (error) {
+      console.error(`Failed to ${type.toLowerCase()} conversation:`, error);
+    } finally {
+      setConfirmAction(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">Loading...</div>
@@ -90,12 +148,16 @@ const Inbox: React.FC = () => {
         conversations={conversations}
         selectedId={selectedId}
         onSelect={setSelectedId}
+        currentUser={currentUser}
       />
       {selectedConversation ? (
         <>
           <ChatArea
             conversation={selectedConversation}
+            currentUser={currentUser}
             onSendMessage={handleSendMessage}
+            onArchive={(id) => setConfirmAction({ type: "ARCHIVE", id })}
+            onDelete={(id) => setConfirmAction({ type: "DELETE", id })}
           />
           <CustomerPanel conversation={selectedConversation} />
         </>
@@ -104,6 +166,24 @@ const Inbox: React.FC = () => {
           Select a conversation to start chatting
         </div>
       )}
+
+      <ConfirmationModal
+        isOpen={!!confirmAction}
+        title={
+          confirmAction?.type === "DELETE"
+            ? "Delete Conversation"
+            : "Archive Conversation"
+        }
+        message={
+          confirmAction?.type === "DELETE"
+            ? "Are you sure you want to permanently delete this conversation? This action cannot be undone."
+            : "Are you sure you want to archive this conversation? It will be moved to the resolved list."
+        }
+        confirmLabel={confirmAction?.type === "DELETE" ? "Delete" : "Archive"}
+        isDestructive={confirmAction?.type === "DELETE"}
+        onConfirm={executeAction}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 };

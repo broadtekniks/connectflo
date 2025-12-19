@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import ReactMarkdown from "react-markdown";
 import {
   Send,
   Paperclip,
@@ -9,20 +10,38 @@ import {
   FileText,
   Sparkles,
   Lock,
+  Archive,
+  Trash2,
 } from "lucide-react";
-import { Conversation, Message, MessageSender, ChannelType } from "../../types";
+import {
+  Conversation,
+  Message,
+  MessageSender,
+  ChannelType,
+  User,
+} from "../../types";
 import { api } from "../../services/api";
 
 interface ChatAreaProps {
   conversation: Conversation;
+  currentUser: User | null;
   onSendMessage: (text: string, isPrivate: boolean) => void;
+  onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
-const ChatArea: React.FC<ChatAreaProps> = ({ conversation, onSendMessage }) => {
+const ChatArea: React.FC<ChatAreaProps> = ({
+  conversation,
+  currentUser,
+  onSendMessage,
+  onArchive,
+  onDelete,
+}) => {
   const [input, setInput] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,8 +54,10 @@ const ChatArea: React.FC<ChatAreaProps> = ({ conversation, onSendMessage }) => {
   const handleGenerateAi = async () => {
     setIsGenerating(true);
     try {
-      const context = `Customer Name: ${
-        conversation.customer.name
+      const context = `Agent Name: ${
+        currentUser?.name || "Agent"
+      }, Customer Name: ${conversation.customer.name}, Email: ${
+        conversation.customer.email
       }, Tags: ${conversation.tags.join(", ")}`;
       const aiMessages = conversation.messages.map((m) => ({
         role:
@@ -89,10 +110,38 @@ const ChatArea: React.FC<ChatAreaProps> = ({ conversation, onSendMessage }) => {
               </span>
             )}
         </div>
-        <div className="flex items-center gap-2">
-          <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-md">
+        <div className="flex items-center gap-2 relative">
+          <button
+            onClick={() => setShowMenu(!showMenu)}
+            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-md"
+          >
             <MoreHorizontal size={20} />
           </button>
+
+          {showMenu && (
+            <div className="absolute top-full right-0 mt-1 w-48 bg-white rounded-lg shadow-lg border border-slate-100 py-1 z-50">
+              <button
+                onClick={() => {
+                  onArchive(conversation.id);
+                  setShowMenu(false);
+                }}
+                className="w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+              >
+                <Archive size={16} />
+                Archive Chat
+              </button>
+              <button
+                onClick={() => {
+                  onDelete(conversation.id);
+                  setShowMenu(false);
+                }}
+                className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+              >
+                <Trash2 size={16} />
+                Delete Chat
+              </button>
+            </div>
+          )}
           {isVoice && (
             <button className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-md font-medium border border-red-200 transition-colors">
               <PhoneOff size={16} />
@@ -256,7 +305,35 @@ const ChatArea: React.FC<ChatAreaProps> = ({ conversation, onSendMessage }) => {
                             <Lock size={10} /> Private Note
                           </div>
                         )}
-                        {msg.content}
+                        <div className="prose prose-sm max-w-none prose-p:my-2 prose-ul:my-2 prose-li:my-1 prose-headings:mt-3 prose-headings:mb-2">
+                          <ReactMarkdown
+                            components={{
+                              p: ({ children }) => (
+                                <p className="mb-2 last:mb-0">{children}</p>
+                              ),
+                              ul: ({ children }) => (
+                                <ul className="list-disc ml-4 space-y-1">
+                                  {children}
+                                </ul>
+                              ),
+                              ol: ({ children }) => (
+                                <ol className="list-decimal ml-4 space-y-1">
+                                  {children}
+                                </ol>
+                              ),
+                              strong: ({ children }) => (
+                                <strong className="font-bold">
+                                  {children}
+                                </strong>
+                              ),
+                              em: ({ children }) => (
+                                <em className="italic">{children}</em>
+                              ),
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
                         {isAI && (
                           <div className="absolute -top-2 -right-2 bg-indigo-100 text-indigo-700 text-[10px] px-1.5 py-0.5 rounded-full font-bold border border-indigo-200 shadow-sm">
                             AI

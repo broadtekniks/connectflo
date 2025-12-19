@@ -29,7 +29,8 @@ export interface User {
   name: string;
   avatar?: string;
   email: string;
-  role: "ADMIN" | "AGENT" | "CUSTOMER";
+  role: "SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER";
+  tenantId?: string;
 }
 
 export interface Message {
@@ -95,8 +96,35 @@ export interface PhoneNumber {
     mms: boolean;
   };
   monthlyCost: number;
+  wholesaleCost?: number;
+  retailPrice?: number;
   setupCost?: number;
   status: "active" | "available";
+  tenantId: string;
+  pricingTierId?: string;
+  pricingTier?: {
+    id: string;
+    name: string;
+    description?: string;
+  };
+  assignedToId?: string;
+  assignedTo?: {
+    id: string;
+    name: string;
+    email: string;
+  };
+}
+
+// Plan Types
+export interface Plan {
+  id: string;
+  name: string;
+  documentLimit: number;
+  docSizeLimitMB: number;
+  pricingDiscount: number;
+  fallbackMarkup: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // Workflow Types
