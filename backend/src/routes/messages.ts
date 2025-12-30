@@ -103,9 +103,31 @@ router.post("/", async (req: Request, res: Response) => {
             where: { tenantId: conversation.tenantId },
           });
 
+          // Best-effort: if there's an active Incoming Message workflow, apply its
+          // workflow-level overrides (tone + optional AI config override).
+          const workflow = await prisma.workflow.findFirst({
+            where: {
+              tenantId: conversation.tenantId,
+              isActive: true,
+              triggerType: "Incoming Message",
+            },
+            include: { aiConfig: true },
+            orderBy: { updatedAt: "desc" },
+          });
+
+          const effectiveAiConfig = (workflow as any)?.aiConfig || aiConfig;
+          const workflowToneOfVoice = String(
+            (workflow as any)?.toneOfVoice ?? ""
+          ).trim();
+          const effectiveToneOfVoice =
+            workflowToneOfVoice ||
+            String((effectiveAiConfig as any)?.toneOfVoice ?? "").trim();
+
           // Build context with business description
           let context = `Customer Name: ${conversation.customer.name}
-Business Description: ${aiConfig?.businessDescription || "Not provided."}`;
+Business Description: ${
+            (effectiveAiConfig as any)?.businessDescription || "Not provided."
+          }`;
 
           // Search knowledge base if we have a user query
           if (lastUserMessage && conversation.tenantId) {
@@ -127,7 +149,9 @@ Business Description: ${aiConfig?.businessDescription || "Not provided."}`;
           const reply = await aiService.generateResponse(
             aiMessages,
             context,
-            aiConfig?.systemPrompt
+            (effectiveAiConfig as any)?.systemPrompt,
+            undefined,
+            { toneOfVoice: effectiveToneOfVoice }
           );
 
           const aiMessage = await prisma.message.create({

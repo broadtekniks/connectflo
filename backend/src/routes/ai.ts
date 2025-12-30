@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { OpenAIService } from "../services/ai/openai";
 import { KnowledgeBaseService } from "../services/knowledgeBase";
 import { AuthRequest } from "../middleware/auth";
+import prisma from "../lib/prisma";
 
 const router = Router();
 // In a real app, you might inject this or use a factory
@@ -13,6 +14,12 @@ router.post("/generate", async (req: Request, res: Response) => {
   try {
     const { messages, context } = req.body;
     const tenantId = authReq.user?.tenantId;
+
+    const aiConfig = tenantId
+      ? await prisma.aiConfig.findUnique({
+          where: { tenantId },
+        })
+      : null;
 
     // Extract the last user message to use as a search query
     const lastUserMessage = messages
@@ -35,12 +42,13 @@ router.post("/generate", async (req: Request, res: Response) => {
     const suggestion = await aiService.generateResponse(
       messages,
       enhancedContext,
-      undefined,
+      aiConfig?.systemPrompt,
       {
         tenantId: tenantId || undefined,
         userId: authReq.user?.userId,
         conversationId: req.body.conversationId,
-      }
+      },
+      { toneOfVoice: aiConfig?.toneOfVoice }
     );
     res.json({ suggestion });
   } catch (error) {

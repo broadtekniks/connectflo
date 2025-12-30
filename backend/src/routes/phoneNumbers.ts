@@ -1,11 +1,13 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { TelnyxService } from "../services/telnyx";
+import { TwilioService } from "../services/twilio";
 import { PricingService } from "../services/pricing";
 import { AuthRequest } from "../middleware/auth";
 
 const router = Router();
 const telnyxService = new TelnyxService();
+const twilioService = new TwilioService();
 const pricingService = new PricingService();
 
 // Get all owned numbers (from local DB)
@@ -66,15 +68,37 @@ router.get("/", async (req: Request, res: Response) => {
   }
 });
 
-// Search available numbers (from Telnyx)
+// Search available numbers (from Telnyx or Twilio)
 router.get("/search", async (req: Request, res: Response) => {
   try {
-    const { country, region } = req.query;
+    const { country, region, provider } = req.query;
+    const selectedProvider = (provider as string) || "TELNYX";
 
-    const numbers = await telnyxService.searchNumbers(
-      (country as string) || "US",
-      region as string
-    );
+    let numbers;
+    if (selectedProvider === "TWILIO") {
+      const twilioNumbers = await twilioService.searchNumbers(
+        (country as string) || "US",
+        region as string
+      );
+      // Map Twilio format to common format
+      numbers = twilioNumbers.map((n: any) => ({
+        phone_number: n.phoneNumber,
+        cost_information: { monthly_cost: "1.15" },
+        region_information: [
+          { region_type: "location", region_name: n.locality },
+          { region_type: "state", region_name: n.region },
+        ],
+        features: Object.entries(n.capabilities)
+          .filter(([_, enabled]) => enabled)
+          .map(([feature]) => ({ name: feature })),
+      }));
+    } else {
+      numbers = await telnyxService.searchNumbers(
+        (country as string) || "US",
+        region as string
+      );
+    }
+
     res.json(numbers);
   } catch (error) {
     console.error("Search error:", error);
@@ -86,8 +110,9 @@ router.get("/search", async (req: Request, res: Response) => {
 router.post("/purchase", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;
   try {
-    const { phoneNumber, friendlyName } = req.body;
+    const { phoneNumber, friendlyName, provider } = req.body;
     const tenantId = authReq.user?.tenantId;
+    const selectedProvider = provider || "TELNYX";
 
     if (!tenantId) {
       return res.status(400).json({ error: "Tenant ID not found in token" });
@@ -102,12 +127,41 @@ router.post("/purchase", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Tenant not found" });
     }
 
-    // 1. Purchase from Telnyx
+    // 1. Purchase from selected provider
     let wholesaleCost = 1.0; // Default
     let region = "Unknown";
     let country = "US";
 
-    if (process.env.TELNYX_API_KEY) {
+    if (selectedProvider === "TWILIO") {
+      // Purchase from Twilio
+      if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+        return res
+          .status(400)
+          .json({ error: "Twilio credentials not configured" });
+      }
+
+      const webhookUrl = process.env.TWILIO_WEBHOOK_URL || "";
+      await twilioService.purchaseNumber(phoneNumber, webhookUrl);
+
+      // Wait for provisioning
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Get number details
+      try {
+        const numberDetails = await twilioService.getNumberDetails(phoneNumber);
+        if (numberDetails) {
+          wholesaleCost = 1.15; // Twilio US local pricing
+          region = numberDetails.friendlyName || "Unknown";
+        }
+      } catch (err) {
+        console.error("Failed to fetch Twilio number details:", err);
+      }
+    } else {
+      // Purchase from Telnyx
+      if (!process.env.TELNYX_API_KEY) {
+        return res.status(400).json({ error: "Telnyx API key not configured" });
+      }
+
       await telnyxService.purchaseNumber(phoneNumber);
 
       // Wait a moment for Telnyx to provision the number
@@ -171,6 +225,7 @@ router.post("/purchase", async (req: Request, res: Response) => {
         region: region,
         type: "local",
         capabilities: { voice: true, sms: true, mms: false },
+        provider: selectedProvider,
         wholesaleCost,
         retailPrice: pricing.retailPrice,
         pricingTierId: pricing.pricingTierId,

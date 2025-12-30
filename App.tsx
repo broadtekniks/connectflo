@@ -21,6 +21,7 @@ import TestChat from "./pages/TestChat";
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [currentView, setCurrentView] = useState("dashboard");
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   // Manage public pages navigation (home, login, signup, pricing, privacy, security, terms)
   const [publicView, setPublicView] = useState("home");
   const [userRole, setUserRole] = useState<
@@ -43,6 +44,17 @@ const App: React.FC = () => {
         localStorage.removeItem("user");
       }
     }
+  }, []);
+
+  useEffect(() => {
+    // Default to collapsed on smaller screens.
+    const setFromViewport = () => {
+      setIsSidebarCollapsed(window.innerWidth < 1024);
+    };
+
+    setFromViewport();
+    window.addEventListener("resize", setFromViewport);
+    return () => window.removeEventListener("resize", setFromViewport);
   }, []);
 
   const handleLogin = () => {
@@ -173,8 +185,26 @@ const App: React.FC = () => {
         userRole={userRole}
         user={user}
         onLogout={handleLogout}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapsed={() => setIsSidebarCollapsed((v) => !v)}
       />
       <main className="flex-1 h-full overflow-hidden relative flex flex-col">
+        {isSidebarCollapsed && (
+          <div className="h-12 bg-white border-b border-slate-200 flex items-center px-4 shrink-0">
+            <button
+              type="button"
+              onClick={() => setCurrentView("dashboard")}
+              className="flex items-center gap-3 hover:opacity-90 transition-opacity"
+              aria-label="Go to dashboard"
+              title="Go to dashboard"
+            >
+              <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shrink-0">
+                <span className="font-bold text-white">C</span>
+              </div>
+              <span className="font-bold text-slate-900">ConnectFlo</span>
+            </button>
+          </div>
+        )}
         {renderAuthenticatedView()}
       </main>
     </div>

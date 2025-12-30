@@ -38,10 +38,152 @@ router.get(
         phoneNumbers: workflow.phoneNumbers.map((wp) => wp.phoneNumber),
         documents: workflow.documents.map((wd) => wd.document),
         integrations: workflow.integrations.map((wi) => wi.integration),
+        phoneVoiceId: workflow.phoneVoiceId,
+        phoneVoiceLanguage: workflow.phoneVoiceLanguage,
+        toneOfVoice: (workflow as any).toneOfVoice ?? null,
       });
     } catch (error) {
       console.error("Error fetching workflow resources:", error);
       res.status(500).json({ error: "Failed to fetch resources" });
+    }
+  }
+);
+
+// Update workflow-level tone of voice override
+router.put(
+  "/:id/tone-of-voice",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+    const toneOfVoice =
+      typeof req.body?.toneOfVoice === "string" ? req.body.toneOfVoice : "";
+
+    try {
+      const workflow = await prisma.workflow.findUnique({
+        where: { id: workflowId },
+      });
+
+      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      const updated = await prisma.workflow.update({
+        where: { id: workflowId },
+        data: {
+          toneOfVoice: toneOfVoice.trim() ? toneOfVoice.trim() : null,
+        },
+        select: { id: true, toneOfVoice: true },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating workflow tone of voice override:", error);
+      res.status(500).json({ error: "Failed to update tone of voice" });
+    }
+  }
+);
+
+// Remove workflow-level tone of voice override
+router.delete(
+  "/:id/tone-of-voice",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+
+    try {
+      const workflow = await prisma.workflow.findUnique({
+        where: { id: workflowId },
+      });
+
+      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      const updated = await prisma.workflow.update({
+        where: { id: workflowId },
+        data: { toneOfVoice: null },
+        select: { id: true, toneOfVoice: true },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error removing workflow tone of voice override:", error);
+      res.status(500).json({ error: "Failed to remove tone of voice" });
+    }
+  }
+);
+
+// Update workflow-level phone voice override
+router.put(
+  "/:id/phone-voice",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+    const phoneVoiceId =
+      typeof req.body?.phoneVoiceId === "string" ? req.body.phoneVoiceId : "";
+    const phoneVoiceLanguage =
+      typeof req.body?.phoneVoiceLanguage === "string"
+        ? req.body.phoneVoiceLanguage
+        : "";
+
+    try {
+      const workflow = await prisma.workflow.findUnique({
+        where: { id: workflowId },
+      });
+
+      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      const updated = await prisma.workflow.update({
+        where: { id: workflowId },
+        data: {
+          phoneVoiceId: phoneVoiceId.trim() ? phoneVoiceId.trim() : null,
+          phoneVoiceLanguage: phoneVoiceLanguage.trim()
+            ? phoneVoiceLanguage.trim()
+            : null,
+        },
+        select: { id: true, phoneVoiceId: true, phoneVoiceLanguage: true },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating workflow phone voice override:", error);
+      res.status(500).json({ error: "Failed to update phone voice" });
+    }
+  }
+);
+
+// Remove workflow-level phone voice override
+router.delete(
+  "/:id/phone-voice",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+
+    try {
+      const workflow = await prisma.workflow.findUnique({
+        where: { id: workflowId },
+      });
+
+      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      const updated = await prisma.workflow.update({
+        where: { id: workflowId },
+        data: { phoneVoiceId: null, phoneVoiceLanguage: null },
+        select: { id: true, phoneVoiceId: true, phoneVoiceLanguage: true },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error removing workflow phone voice override:", error);
+      res.status(500).json({ error: "Failed to remove phone voice" });
     }
   }
 );

@@ -134,13 +134,18 @@ export class TelnyxService {
     }
   }
 
-  async speakText(callControlId: string, text: string) {
+  async speakText(
+    callControlId: string,
+    text: string,
+    voice: string = "female",
+    language: string = "en-US"
+  ) {
     if (!telnyx) return;
     try {
       await telnyx.calls.actions.speak(callControlId, {
         payload: text,
-        voice: "female",
-        language: "en-US",
+        voice: voice,
+        language: language,
       });
     } catch (error) {
       console.error("Failed to speak text:", error);
@@ -257,6 +262,58 @@ export class TelnyxService {
       return response.data;
     } catch (error: any) {
       throw error;
+    }
+  }
+
+  /**
+   * Start media streaming for a call
+   * This enables real-time audio streaming to a WebSocket endpoint
+   */
+  async startMediaStreaming(
+    callControlId: string,
+    streamUrl: string
+  ): Promise<void> {
+    if (!telnyx) throw new Error("Telnyx API key not configured");
+
+    try {
+      await telnyx.calls.actions.startStreaming(callControlId, {
+        stream_url: streamUrl,
+        stream_track: "both_tracks", // inbound and outbound audio
+      });
+      console.log(
+        `Started media streaming for call ${callControlId} to ${streamUrl}`
+      );
+    } catch (error) {
+      console.error("Failed to start media streaming:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Stop media streaming for a call
+   */
+  async stopMediaStreaming(callControlId: string): Promise<void> {
+    if (!telnyx) throw new Error("Telnyx API key not configured");
+
+    try {
+      await telnyx.calls.actions.stopStreaming(callControlId);
+      console.log(`Stopped media streaming for call ${callControlId}`);
+    } catch (error) {
+      console.error("Failed to stop media streaming:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Hangup a call
+   */
+  async hangupCall(callControlId: string): Promise<void> {
+    if (!telnyx) return;
+    try {
+      await telnyx.calls.actions.hangup(callControlId);
+      console.log(`Hung up call ${callControlId}`);
+    } catch (error) {
+      console.error("Failed to hangup call:", error);
     }
   }
 }

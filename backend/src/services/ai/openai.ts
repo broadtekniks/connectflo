@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { AIService } from "./types";
 import { usageService } from "../usage";
+import { applyToneOfVoiceToSystemPrompt } from "./toneOfVoice";
 
 export class OpenAIService implements AIService {
   private openai: OpenAI;
@@ -19,11 +20,16 @@ export class OpenAIService implements AIService {
     messages: { role: "user" | "assistant" | "system"; content: string }[],
     context?: string,
     systemPrompt?: string,
-    metadata?: { tenantId?: string; userId?: string; conversationId?: string }
+    metadata?: { tenantId?: string; userId?: string; conversationId?: string },
+    options?: { toneOfVoice?: string }
   ): Promise<string> {
     try {
       const defaultPrompt = `You are a helpful customer support AI assistant for ConnectFlo.`;
-      const basePrompt = systemPrompt || defaultPrompt;
+      const basePromptRaw = systemPrompt || defaultPrompt;
+      const basePrompt = applyToneOfVoiceToSystemPrompt(
+        basePromptRaw,
+        options?.toneOfVoice
+      );
 
       const systemMessage = {
         role: "system" as const,

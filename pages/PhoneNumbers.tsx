@@ -42,6 +42,9 @@ const PhoneNumbers: React.FC = () => {
   const [viewMode, setViewMode] = useState<"list" | "card">("list");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchCountry, setSearchCountry] = useState("US");
+  const [selectedProvider, setSelectedProvider] = useState<"TELNYX" | "TWILIO">(
+    "TELNYX"
+  );
   const [isSearching, setIsSearching] = useState(false);
   const [isPurchasing, setIsPurchasing] = useState<string | null>(null);
   const [ownedNumbers, setOwnedNumbers] = useState<PhoneNumber[]>([]);
@@ -222,8 +225,12 @@ const PhoneNumbers: React.FC = () => {
   const handleSearch = async () => {
     setIsSearching(true);
     try {
-      const results = await api.phoneNumbers.search(searchCountry, searchQuery);
-      // Map Telnyx results to PhoneNumber type
+      const results = await api.phoneNumbers.search(
+        searchCountry,
+        searchQuery,
+        selectedProvider
+      );
+      // Map results to PhoneNumber type
       console.log("Search Results:", results);
       const mappedResults = results.map((r: any) => {
         let regionStr = "Unknown";
@@ -275,7 +282,7 @@ const PhoneNumbers: React.FC = () => {
   const handlePurchase = async (phoneNumber: string) => {
     setIsPurchasing(phoneNumber);
     try {
-      await api.phoneNumbers.purchase(phoneNumber);
+      await api.phoneNumbers.purchase(phoneNumber, undefined, selectedProvider);
       await loadOwnedNumbers();
       setActiveTab("my-numbers");
       setSearchResults((prev) =>
@@ -401,6 +408,7 @@ const PhoneNumbers: React.FC = () => {
                   <tr>
                     <th className="px-6 py-3 font-semibold">Number</th>
                     <th className="px-6 py-3 font-semibold">Region</th>
+                    <th className="px-6 py-3 font-semibold">Provider</th>
                     {isSuperAdmin && (
                       <th className="px-6 py-3 font-semibold">Tenant</th>
                     )}
@@ -448,6 +456,17 @@ const PhoneNumbers: React.FC = () => {
                             : num.country}
                         </div>
                       </td>
+                      <td className="px-6 py-4">
+                        <span
+                          className={`px-2 py-1 text-xs font-bold rounded-full ${
+                            num.provider === "TWILIO"
+                              ? "bg-purple-100 text-purple-700"
+                              : "bg-blue-100 text-blue-700"
+                          }`}
+                        >
+                          {num.provider || "TELNYX"}
+                        </span>
+                      </td>
                       {isSuperAdmin && (
                         <td className="px-6 py-4 text-slate-600">
                           <div
@@ -455,7 +474,7 @@ const PhoneNumbers: React.FC = () => {
                             title={`Tenant ID: ${num.tenantId}`}
                           >
                             {tenants.find((t) => t.id === num.tenantId)?.name ||
-                              "Unknown Tenant"}
+                              "Unassigned"}
                           </div>
                         </td>
                       )}
@@ -659,7 +678,25 @@ const PhoneNumbers: React.FC = () => {
                 Search for Numbers
               </h2>
               <div className="flex flex-col md:flex-row gap-4 items-end">
-                <div className="w-full md:w-1/4">
+                <div className="w-full md:w-1/5">
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Provider
+                  </label>
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => {
+                      setSelectedProvider(
+                        e.target.value as "TELNYX" | "TWILIO"
+                      );
+                      setSearchResults([]);
+                    }}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                  >
+                    <option value="TELNYX">Telnyx</option>
+                    <option value="TWILIO">Twilio (OpenAI Voice)</option>
+                  </select>
+                </div>
+                <div className="w-full md:w-1/5">
                   <label className="block text-sm font-medium text-slate-700 mb-1">
                     Country
                   </label>
@@ -677,7 +714,7 @@ const PhoneNumbers: React.FC = () => {
                     <option value="AU">Australia (+61)</option>
                   </select>
                 </div>
-                <div className="w-full md:w-1/2">
+                <div className="w-full md:w-2/5">
                   <label className="block text-sm font-medium text-slate-700 mb-1">
                     Search by Region or Area Code
                   </label>
@@ -696,7 +733,7 @@ const PhoneNumbers: React.FC = () => {
                     />
                   </div>
                 </div>
-                <div className="w-full md:w-1/4">
+                <div className="w-full md:w-1/5">
                   <button
                     onClick={handleSearch}
                     disabled={isSearching}

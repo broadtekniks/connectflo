@@ -234,9 +234,14 @@ export const api = {
       if (!response.ok) throw new Error("Failed to fetch phone numbers");
       return response.json();
     },
-    search: async (country: string, region?: string): Promise<any[]> => {
+    search: async (
+      country: string,
+      region?: string,
+      provider?: string
+    ): Promise<any[]> => {
       const params = new URLSearchParams({ country });
       if (region) params.append("region", region);
+      if (provider) params.append("provider", provider);
 
       const response = await fetch(
         `${API_URL}/phone-numbers/search?${params}`,
@@ -249,12 +254,13 @@ export const api = {
     },
     purchase: async (
       phoneNumber: string,
-      friendlyName?: string
+      friendlyName?: string,
+      provider?: string
     ): Promise<PhoneNumber> => {
       const response = await fetch(`${API_URL}/phone-numbers/purchase`, {
         method: "POST",
         headers: authHeader(),
-        body: JSON.stringify({ phoneNumber, friendlyName }),
+        body: JSON.stringify({ phoneNumber, friendlyName, provider }),
       });
       if (!response.ok) throw new Error("Failed to purchase phone number");
       return response.json();
@@ -572,5 +578,71 @@ export const api = {
       if (!response.ok) throw new Error("Failed to fetch usage breakdown");
       return response.json();
     },
+  },
+
+  voiceConfig: {
+    getVoices: async () => {
+      const response = await fetch(`${API_URL}/voice-config/voices`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch voices");
+      return response.json();
+    },
+    getPreference: async (tenantId: string) => {
+      const response = await fetch(
+        `${API_URL}/voice-config/preference/${tenantId}`,
+        {
+          headers: authHeader(),
+        }
+      );
+      if (!response.ok) throw new Error("Failed to fetch voice preference");
+      return response.json();
+    },
+    setPreference: async (data: {
+      tenantId: string;
+      voice: string;
+      language: string;
+    }) => {
+      const response = await fetch(`${API_URL}/voice-config/preference`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to set voice preference");
+      return response.json();
+    },
+    testVoice: async (data: {
+      phoneNumber: string;
+      voice: string;
+      language: string;
+      testMessage: string;
+    }) => {
+      const response = await fetch(`${API_URL}/voice-config/test`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to test voice");
+      return response.json();
+    },
+  },
+
+  // Helper methods for direct HTTP calls
+  get: async (endpoint: string) => {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      headers: authHeader(),
+    });
+    if (!response.ok) throw new Error(`GET ${endpoint} failed`);
+    return response.json();
+  },
+
+  post: async (endpoint: string, data?: any) => {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      method: "POST",
+      headers: authHeader(),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    if (!response.ok) throw new Error(`POST ${endpoint} failed`);
+    return response.json();
   },
 };

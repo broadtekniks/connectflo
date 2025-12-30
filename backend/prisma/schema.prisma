@@ -1,11 +1,275 @@
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["postgresqlExtensions", "driverAdapters"]
+  previewFeatures = ["driverAdapters", "postgresqlExtensions"]
 }
 
 datasource db {
   provider   = "postgresql"
   extensions = [vector]
+}
+
+model User {
+  id                    String         @id @default(uuid())
+  email                 String         @unique
+  password              String?
+  name                  String
+  avatar                String?
+  role                  Role           @default(CUSTOMER)
+  tenantId              String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  assignedConversations Conversation[] @relation("AssignedAgent")
+  conversations         Conversation[] @relation("Customer")
+  assignedPhoneNumbers  PhoneNumber[]  @relation("AssignedUser")
+  tenant                Tenant?        @relation(fields: [tenantId], references: [id])
+}
+
+model Conversation {
+  id           String             @id @default(uuid())
+  channel      ChannelType
+  status       ConversationStatus @default(OPEN)
+  subject      String?
+  priority     String             @default("MEDIUM")
+  sentiment    Sentiment          @default(NEUTRAL)
+  tags         String[]
+  tenantId     String             @default("default")
+  lastActivity DateTime           @default(now())
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  customerId   String
+  assigneeId   String?
+  assignee     User?              @relation("AssignedAgent", fields: [assigneeId], references: [id])
+  customer     User               @relation("Customer", fields: [customerId], references: [id])
+  messages     Message[]
+  usageRecords UsageRecord[]
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  content        String
+  sender         MessageSender
+  isPrivateNote  Boolean       @default(false)
+  attachments    String[]
+  createdAt      DateTime      @default(now())
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model Document {
+  id        String             @id @default(uuid())
+  name      String
+  type      String
+  size      Int
+  url       String
+  status    String             @default("PENDING")
+  tenantId  String             @default("default")
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  chunks    DocumentChunk[]
+  workflows WorkflowDocument[]
+}
+
+model DocumentChunk {
+  id            String   @id @default(uuid())
+  content       String
+  embeddingJson Json?
+  documentId    String
+  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model Integration {
+  id           String                @id @default(uuid())
+  name         String
+  provider     String // 'google', 'shopify', 'stripe', etc.
+  type         String // 'calendar', 'gmail', 'drive', 'sheets', etc.
+  icon         String?
+  connected    Boolean               @default(false)
+  description  String?
+  category     String?
+  config       Json? // Provider-specific configuration
+  credentials  Json? // Encrypted OAuth tokens: { accessToken, refreshToken, expiresAt, scope }
+  tenantId     String                @default("default")
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  workflows    WorkflowIntegration[]
+
+  @@unique([tenantId, provider, type], name: "tenantId_provider_type")
+}
+
+model Workflow {
+  id                 String                @id @default(uuid())
+  name               String
+  description        String
+  isActive           Boolean               @default(false)
+  triggerType        String
+  runs               Int                   @default(0)
+  lastRun            DateTime?
+  nodes              Json
+  edges              Json
+  tenantId           String                @default("default")
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  aiConfigId         String?
+  phoneVoiceId       String?
+  phoneVoiceLanguage String?
+  toneOfVoice        String?
+  aiConfig           AiConfig?             @relation(fields: [aiConfigId], references: [id])
+  documents          WorkflowDocument[]
+  integrations       WorkflowIntegration[]
+  phoneNumbers       WorkflowPhoneNumber[]
+}
+
+model PhoneNumber {
+  id            String                @id @default(uuid())
+  number        String                @unique
+  friendlyName  String
+  country       String
+  region        String
+  type          String
+  capabilities  Json
+  wholesaleCost Float
+  retailPrice   Float
+  setupCost     Float?
+  pricingTierId String?
+  monthlyCost   Float                 @default(0)
+  status        String
+  tenantId      String                @default("default")
+  assignedToId  String?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  provider      PhoneProvider         @default(TELNYX)
+  assignedTo    User?                 @relation("AssignedUser", fields: [assignedToId], references: [id])
+  pricingTier   PricingTier?          @relation(fields: [pricingTierId], references: [id])
+  usageRecords  UsageRecord[]
+  workflows     WorkflowPhoneNumber[]
+}
+
+model Tenant {
+  id                 String    @id @default(uuid())
+  name               String
+  slug               String    @unique
+  plan               String    @default("STARTER")
+  status             String    @default("ACTIVE")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  phoneVoiceId       String?
+  phoneVoiceLanguage String?
+  aiConfig           AiConfig?
+  users              User[]
+}
+
+model Plan {
+  id                         String   @id @default(uuid())
+  name                       String   @unique
+  documentLimit              Int      @default(5)
+  docSizeLimitMB             Int      @default(10)
+  pricingDiscount            Float    @default(0.0)
+  fallbackMarkup             Float    @default(0.50)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+  maxDocumentsPerWorkflow    Int      @default(10)
+  maxIntegrationsPerWorkflow Int      @default(3)
+  maxPhoneNumbersPerWorkflow Int      @default(2)
+  maxWorkflows               Int      @default(10)
+}
+
+model PricingTier {
+  id           String        @id @default(uuid())
+  name         String
+  description  String?
+  wholesaleMin Float
+  wholesaleMax Float
+  retailPrice  Float
+  priority     Int           @default(0)
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  phoneNumbers PhoneNumber[]
+}
+
+model AiConfig {
+  id                  String     @id @default(uuid())
+  tenantId            String     @unique
+  name                String     @default("Flo")
+  toneOfVoice         String     @default("Friendly & Casual")
+  businessDescription String?
+  systemPrompt        String     @default("You are Flo, a helpful assistant.")
+  voiceId             String     @default("alloy")
+  speakingRate        Float      @default(1.0)
+  handoffThreshold    Float      @default(0.7)
+  autoEscalate        Boolean    @default(true)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  tenant              Tenant     @relation(fields: [tenantId], references: [id])
+  workflows           Workflow[]
+}
+
+model UsageRecord {
+  id              String        @id @default(uuid())
+  tenantId        String
+  userId          String?
+  type            UsageType
+  phoneNumberId   String?
+  callSid         String?
+  durationSeconds Int?
+  model           String?
+  inputTokens     Int?
+  outputTokens    Int?
+  totalTokens     Int?
+  messageCount    Int?
+  messageId       String?
+  wholesaleCost   Float
+  retailCost      Float
+  markup          Float
+  conversationId  String?
+  metadata        Json?
+  createdAt       DateTime      @default(now())
+  conversation    Conversation? @relation(fields: [conversationId], references: [id])
+  phoneNumber     PhoneNumber?  @relation(fields: [phoneNumberId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([conversationId])
+}
+
+model WorkflowPhoneNumber {
+  id            String      @id @default(uuid())
+  workflowId    String
+  phoneNumberId String
+  createdAt     DateTime    @default(now())
+  phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
+  workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, phoneNumberId])
+  @@index([workflowId])
+  @@index([phoneNumberId])
+}
+
+model WorkflowDocument {
+  id         String   @id @default(uuid())
+  workflowId String
+  documentId String
+  createdAt  DateTime @default(now())
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, documentId])
+  @@index([workflowId])
+  @@index([documentId])
+}
+
+model WorkflowIntegration {
+  id            String      @id @default(uuid())
+  workflowId    String
+  integrationId String
+  createdAt     DateTime    @default(now())
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, integrationId])
+  @@index([workflowId])
+  @@index([integrationId])
 }
 
 enum Role {
@@ -54,293 +318,7 @@ enum UsageType {
   STORAGE_GB
 }
 
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String?  // Hashed password
-  name      String
-  avatar    String?
-  role      Role     @default(CUSTOMER)
-  tenantId  String?
-  tenant    Tenant?  @relation(fields: [tenantId], references: [id])
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relations
-  assignedConversations Conversation[] @relation("AssignedAgent")
-  conversations         Conversation[] @relation("Customer")
-  assignedPhoneNumbers  PhoneNumber[]  @relation("AssignedUser")
-}
-
-model Conversation {
-  id           String             @id @default(uuid())
-  channel      ChannelType
-  status       ConversationStatus @default(OPEN)
-  subject      String?
-  priority     String             @default("MEDIUM") // LOW, MEDIUM, HIGH
-  sentiment    Sentiment          @default(NEUTRAL)
-  tags         String[]
-  tenantId     String             @default("default")
-  lastActivity DateTime           @default(now())
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
-
-  // Relations
-  customerId String
-  customer   User      @relation("Customer", fields: [customerId], references: [id])
-  assigneeId String?
-  assignee   User?     @relation("AssignedAgent", fields: [assigneeId], references: [id])
-  messages   Message[]
-  usageRecords UsageRecord[]
-}
-
-model Message {
-  id             String        @id @default(uuid())
-  content        String
-  sender         MessageSender
-  isPrivateNote  Boolean       @default(false)
-  attachments    String[]
-  createdAt      DateTime      @default(now())
-  
-  // Relations
-  conversationId String
-  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-}
-
-model Document {
-  id        String          @id @default(uuid())
-  name      String
-  type      String          // pdf, docx, txt
-  size      Int
-  url       String
-  status    String          @default("PENDING") // PENDING, INDEXING, READY, ERROR
-  tenantId  String          @default("default")
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
-  chunks    DocumentChunk[]
-  workflows WorkflowDocument[]
-}
-
-model DocumentChunk {
-  id         String                 @id @default(uuid())
-  content    String
-  // embedding  Unsupported("vector")? // Commented out to avoid pgvector dependency issues in this env
-  embeddingJson Json?               // Storing as JSON for compatibility
-  documentId String
-  document   Document               @relation(fields: [documentId], references: [id], onDelete: Cascade)
-}
-
-model Integration {
-  id          String   @id @default(uuid())
-  name        String
-  icon        String
-  connected   Boolean  @default(false)
-  description String
-  category    String
-  config      Json?
-  tenantId    String   @default("default")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  workflows   WorkflowIntegration[]
-}
-
-model Workflow {
-  id          String   @id @default(uuid())
-  name        String
-  description String
-  isActive    Boolean  @default(false)
-  triggerType String
-  runs        Int      @default(0)
-  lastRun     DateTime?
-  nodes       Json     // Storing nodes as JSON for flexibility
-  edges       Json     // Storing edges as JSON for flexibility
-  tenantId    String   @default("default")
-  
-  // Resource assignments
-  aiConfigId  String?
-  aiConfig    AiConfig? @relation(fields: [aiConfigId], references: [id])
-  phoneNumbers WorkflowPhoneNumber[]
-  documents    WorkflowDocument[]
-  integrations WorkflowIntegration[]
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model PhoneNumber {
-  id             String   @id @default(uuid())
-  number         String   @unique
-  friendlyName   String
-  country        String
-  region         String
-  type           String
-  capabilities   Json     // { voice: boolean, sms: boolean, mms: boolean }
-  
-  // Pricing fields
-  wholesaleCost  Float    // What Telnyx charges us
-  retailPrice    Float    // What customer pays
-  setupCost      Float?
-  pricingTierId  String?
-  pricingTier    PricingTier? @relation(fields: [pricingTierId], references: [id])
-  
-  // Legacy field (keep for backward compatibility)
-  monthlyCost    Float    @default(0)
-  
-  status         String
-  tenantId       String   @default("default")
-  
-  // Assignment
-  assignedToId   String?
-  assignedTo     User?    @relation("AssignedUser", fields: [assignedToId], references: [id])
-  
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  
-  usageRecords   UsageRecord[]
-  workflows      WorkflowPhoneNumber[]
-}
-
-model Tenant {
-  id        String   @id @default(uuid())
-  name      String
-  slug      String   @unique
-  plan      String   @default("STARTER") // STARTER, PRO, ENTERPRISE
-  status    String   @default("ACTIVE") // ACTIVE, INACTIVE, PAST_DUE
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  users     User[]
-  aiConfig  AiConfig?
-}
-
-model Plan {
-  id               String   @id @default(uuid())
-  name             String   @unique // STARTER, PRO, ENTERPRISE
-  documentLimit    Int      @default(5)
-  docSizeLimitMB   Int      @default(10) // Max size per file in MB
-  
-  // Phone number pricing
-  pricingDiscount  Float    @default(0.0)  // 0.0 = no discount, 0.10 = 10% off tier prices
-  fallbackMarkup   Float    @default(0.50) // 50% markup for numbers outside tiers
-  
-  // Workflow resource limits
-  maxWorkflows                Int      @default(10)
-  maxPhoneNumbersPerWorkflow  Int      @default(2)
-  maxDocumentsPerWorkflow     Int      @default(10)
-  maxIntegrationsPerWorkflow  Int      @default(3)
-  
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-}
-
-model PricingTier {
-  id            String        @id @default(uuid())
-  name          String        // "Basic Local", "Premium Local", "Toll-Free", etc.
-  description   String?
-  wholesaleMin  Float         // Minimum Telnyx cost for this tier
-  wholesaleMax  Float         // Maximum Telnyx cost for this tier
-  retailPrice   Float         // What customers pay
-  priority      Int           @default(0) // Higher priority tiers checked first
-  isActive      Boolean       @default(true)
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  phoneNumbers  PhoneNumber[]
-}
-
-model AiConfig {
-  id               String   @id @default(uuid())
-  tenantId         String   @unique
-  tenant           Tenant   @relation(fields: [tenantId], references: [id])
-  name             String   @default("Flo")
-  toneOfVoice      String   @default("Friendly & Casual")
-  businessDescription String? // Short description of the business for context
-  systemPrompt     String   @default("You are Flo, a helpful assistant.")
-  voiceId          String   @default("alloy")
-  speakingRate     Float    @default(1.0)
-  handoffThreshold Float    @default(0.7)
-  autoEscalate     Boolean  @default(true)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  workflows        Workflow[]
-}
-
-model UsageRecord {
-  id              String       @id @default(uuid())
-  tenantId        String
-  userId          String?
-  
-  type            UsageType
-  
-  // Voice-specific
-  phoneNumberId   String?
-  phoneNumber     PhoneNumber? @relation(fields: [phoneNumberId], references: [id])
-  callSid         String?      // Telnyx call ID
-  durationSeconds Int?         // Call duration
-  
-  // AI-specific
-  model           String?      // e.g., "gpt-4", "text-embedding-ada-002"
-  inputTokens     Int?
-  outputTokens    Int?
-  totalTokens     Int?
-  
-  // SMS-specific
-  messageCount    Int?         // Number of SMS segments
-  messageId       String?      // Telnyx message ID
-  
-  // Pricing
-  wholesaleCost   Float        // What you paid (Telnyx/OpenAI)
-  retailCost      Float        // What customer is charged
-  markup          Float        // Your margin
-  
-  // Context
-  conversationId  String?
-  conversation    Conversation? @relation(fields: [conversationId], references: [id])
-  
-  metadata        Json?        // Flexible field for extra data
-  
-  createdAt       DateTime     @default(now())
-  
-  @@index([tenantId, createdAt])
-  @@index([userId, createdAt])
-  @@index([type, createdAt])
-  @@index([conversationId])
-}
-
-// Junction tables for workflow resource assignments
-model WorkflowPhoneNumber {
-  id            String      @id @default(uuid())
-  workflowId    String
-  phoneNumberId String
-  workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
-  createdAt     DateTime    @default(now())
-  
-  @@unique([workflowId, phoneNumberId])
-  @@index([workflowId])
-  @@index([phoneNumberId])
-}
-
-model WorkflowDocument {
-  id         String    @id @default(uuid())
-  workflowId String
-  documentId String
-  workflow   Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  createdAt  DateTime  @default(now())
-  
-  @@unique([workflowId, documentId])
-  @@index([workflowId])
-  @@index([documentId])
-}
-
-model WorkflowIntegration {
-  id            String      @id @default(uuid())
-  workflowId    String
-  integrationId String
-  workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  createdAt     DateTime    @default(now())
-  
-  @@unique([workflowId, integrationId])
-  @@index([workflowId])
-  @@index([integrationId])
+enum PhoneProvider {
+  TELNYX
+  TWILIO
 }

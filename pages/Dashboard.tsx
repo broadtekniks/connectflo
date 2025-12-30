@@ -237,8 +237,8 @@ const Dashboard: React.FC = () => {
                   <div className="h-80 w-full">
                     <ResponsiveContainer
                       width="100%"
-                      height="100%"
-                      minWidth={0}
+                      height={320}
+                      debounce={50}
                     >
                       <BarChart data={overviewData}>
                         <CartesianGrid
@@ -291,11 +291,11 @@ const Dashboard: React.FC = () => {
                   <p className="text-sm text-slate-500 mb-6">
                     Sessions handled by AI vs Agents
                   </p>
-                  <div className="flex-1 min-h-[200px] relative">
+                  <div className="h-80 w-full relative">
                     <ResponsiveContainer
                       width="100%"
-                      height="100%"
-                      minWidth={0}
+                      height={320}
+                      debounce={50}
                     >
                       <PieChart>
                         <Pie
@@ -461,8 +461,8 @@ const Dashboard: React.FC = () => {
                   <div className="h-80 w-full">
                     <ResponsiveContainer
                       width="100%"
-                      height="100%"
-                      minWidth={0}
+                      height={320}
+                      debounce={50}
                     >
                       <BarChart data={MOCK_VOICE_COSTS}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -556,8 +556,8 @@ const Dashboard: React.FC = () => {
                   <div className="h-80 w-full">
                     <ResponsiveContainer
                       width="100%"
-                      height="100%"
-                      minWidth={0}
+                      height={320}
+                      debounce={50}
                     >
                       <AreaChart data={MOCK_SENTIMENT_HISTORY}>
                         <defs>
@@ -630,8 +630,8 @@ const Dashboard: React.FC = () => {
                   <div className="h-80 w-full">
                     <ResponsiveContainer
                       width="100%"
-                      height="100%"
-                      minWidth={0}
+                      height={320}
+                      debounce={50}
                     >
                       <BarChart
                         layout="vertical"

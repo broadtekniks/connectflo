@@ -11,6 +11,7 @@ import {
   Building,
   LogOut,
   MessageSquare,
+  Menu,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -19,6 +20,8 @@ interface SidebarProps {
   onLogout: () => void;
   userRole?: "SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER";
   user?: any;
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -27,6 +30,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   onLogout,
   userRole = "AGENT",
   user,
+  isCollapsed,
+  onToggleCollapsed,
 }) => {
   const navItems = [
     {
@@ -91,17 +96,42 @@ const Sidebar: React.FC<SidebarProps> = ({
   );
 
   return (
-    <div className="w-16 lg:w-64 bg-slate-900 text-white flex flex-col h-full transition-all duration-300 border-r border-slate-800 shrink-0">
+    <div
+      className={`${
+        isCollapsed ? "w-16" : "w-64"
+      } bg-slate-900 text-white flex flex-col h-full transition-all duration-300 border-r border-slate-800 shrink-0`}
+    >
       <div
-        className="h-16 flex items-center justify-center lg:justify-start lg:px-6 border-b border-slate-800 cursor-pointer"
-        onClick={() => onNavigate("dashboard")}
+        className={`relative h-16 flex items-center border-b border-slate-800 ${
+          isCollapsed ? "justify-center" : "justify-between px-4"
+        }`}
       >
-        <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shrink-0">
-          <span className="font-bold text-white">C</span>
-        </div>
-        <span className="ml-3 font-bold text-lg hidden lg:block">
-          ConnectFlo
-        </span>
+        {!isCollapsed && (
+          <div
+            className="flex items-center justify-start cursor-pointer"
+            onClick={() => onNavigate("dashboard")}
+          >
+            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shrink-0">
+              <span className="font-bold text-white">C</span>
+            </div>
+            <span className="ml-3 font-bold text-lg">ConnectFlo</span>
+          </div>
+        )}
+
+        <button
+          type="button"
+          className={`inline-flex rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors ${
+            isCollapsed ? "absolute top-2 right-2 p-2 z-20" : "p-2"
+          }`}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleCollapsed();
+          }}
+        >
+          <Menu size={18} />
+        </button>
       </div>
 
       <nav className="flex-1 py-6 space-y-1">
@@ -109,16 +139,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           <button
             key={item.id}
             onClick={() => onNavigate(item.id)}
-            className={`w-full flex items-center px-3 lg:px-6 py-3 transition-colors duration-200 ${
+            className={`w-full flex items-center px-3 py-3 transition-colors duration-200 ${
               currentView === item.id
                 ? "bg-indigo-600 text-white border-r-4 border-indigo-300"
                 : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
             }`}
+            title={isCollapsed ? item.label : undefined}
           >
             <item.icon size={20} className="shrink-0" />
-            <span className="ml-3 font-medium hidden lg:block">
-              {item.label}
-            </span>
+            {!isCollapsed && (
+              <span className="ml-3 font-medium">{item.label}</span>
+            )}
           </button>
         ))}
       </nav>
@@ -139,16 +170,18 @@ const Sidebar: React.FC<SidebarProps> = ({
               alt="User"
               className="w-8 h-8 rounded-full border border-slate-600 shrink-0"
             />
-            <div className="ml-3 hidden lg:block overflow-hidden">
-              <p className="text-sm font-medium text-white truncate">
-                {user?.name || "User"}
-              </p>
-              <p className="text-xs text-slate-400 truncate">{userRole}</p>
-            </div>
+            {!isCollapsed && (
+              <div className="ml-3 overflow-hidden">
+                <p className="text-sm font-medium text-white truncate">
+                  {user?.name || "User"}
+                </p>
+                <p className="text-xs text-slate-400 truncate">{userRole}</p>
+              </div>
+            )}
           </div>
           <button
             onClick={onLogout}
-            className="hidden lg:flex text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-slate-800"
+            className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-slate-800"
             title="Logout"
           >
             <LogOut size={18} />

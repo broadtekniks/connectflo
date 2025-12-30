@@ -28,6 +28,7 @@ import {
 import { User as UserType, Plan } from "../types";
 import { api } from "../services/api";
 import TestChatWidget from "../components/TestChatWidget";
+import PhoneVoiceSettings from "../components/PhoneVoiceSettings";
 
 const TEAM_MEMBERS = [
   {
@@ -95,10 +96,8 @@ const Settings: React.FC = () => {
   const [systemPrompt, setSystemPrompt] = useState(
     "You are Flo, a helpful and friendly customer support assistant for ConnectFlo. You answer questions concisely and escalate to a human if the customer seems angry."
   );
-  const [voiceId, setVoiceId] = useState("alloy");
   const [handoffThreshold, setHandoffThreshold] = useState(0.7);
   const [autoEscalate, setAutoEscalate] = useState(true);
-  const [speakingRate, setSpeakingRate] = useState(1.0);
   const [saving, setSaving] = useState(false);
 
   // Plans State (Super Admin only)
@@ -122,10 +121,8 @@ const Settings: React.FC = () => {
           setToneOfVoice(config.toneOfVoice || "Friendly & Casual");
           setBusinessDescription(config.businessDescription || "");
           setSystemPrompt(config.systemPrompt);
-          setVoiceId(config.voiceId);
           setHandoffThreshold(config.handoffThreshold);
           setAutoEscalate(config.autoEscalate);
-          setSpeakingRate(config.speakingRate);
         })
         .catch(console.error);
     }
@@ -147,8 +144,6 @@ const Settings: React.FC = () => {
         toneOfVoice,
         businessDescription,
         systemPrompt,
-        voiceId,
-        speakingRate,
         handoffThreshold,
         autoEscalate,
       });
@@ -373,64 +368,10 @@ const Settings: React.FC = () => {
                 />
               </div>
 
-              {/* Voice Settings */}
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <Volume2 size={18} className="text-indigo-500" /> Voice
-                  Settings (TTS)
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                      Voice Model
-                    </label>
-                    <div className="grid grid-cols-2 gap-3">
-                      {[
-                        "alloy",
-                        "echo",
-                        "fable",
-                        "onyx",
-                        "nova",
-                        "shimmer",
-                      ].map((voice) => (
-                        <button
-                          key={voice}
-                          onClick={() => setVoiceId(voice)}
-                          className={`flex items-center justify-center gap-2 px-3 py-2 border rounded-lg text-sm font-medium capitalize transition-colors ${
-                            voiceId === voice
-                              ? "bg-indigo-50 border-indigo-500 text-indigo-700"
-                              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                          }`}
-                        >
-                          {voiceId === voice && <Mic size={14} />}
-                          {voice}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                      Speaking Rate
-                    </label>
-                    <input
-                      type="range"
-                      min="0.5"
-                      max="2.0"
-                      step="0.1"
-                      value={speakingRate}
-                      onChange={(e) =>
-                        setSpeakingRate(parseFloat(e.target.value))
-                      }
-                      className="w-full accent-indigo-600"
-                    />
-                    <div className="flex justify-between text-xs text-slate-400 mt-1">
-                      <span>Slow (0.5x)</span>
-                      <span>Normal (1.0x)</span>
-                      <span>Fast (2.0x)</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              {/* Phone Voice Settings Component */}
+              {user?.tenantId && (
+                <PhoneVoiceSettings tenantId={user.tenantId} />
+              )}
 
               {/* Handoff Rules */}
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">

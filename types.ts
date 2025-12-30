@@ -95,6 +95,7 @@ export interface PhoneNumber {
     sms: boolean;
     mms: boolean;
   };
+  provider?: "TELNYX" | "TWILIO"; // Phone provider
   monthlyCost: number;
   wholesaleCost?: number;
   retailPrice?: number;
@@ -156,4 +157,6 @@ export interface Workflow {
   lastRun: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  phoneVoiceId?: string | null;
+  phoneVoiceLanguage?: string | null;
 }

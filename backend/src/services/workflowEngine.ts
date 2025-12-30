@@ -2,6 +2,14 @@ import prisma from "../lib/prisma";
 import { TelnyxService } from "./telnyx";
 import { OpenAIService } from "./ai/openai";
 import { KnowledgeBaseService } from "./knowledgeBase";
+import { variableResolver, WorkflowContext } from "./variableResolver";
+import { conditionEvaluator, ConditionConfig } from "./conditionEvaluator";
+import { EmailService } from "./email";
+import { applyToneOfVoiceToSystemPrompt } from "./ai/toneOfVoice";
+import { GoogleCalendarService } from "./integrations/google/calendar";
+import { GoogleGmailService } from "./integrations/google/gmail";
+import { GoogleDriveService } from "./integrations/google/drive";
+import { GoogleSheetsService } from "./integrations/google/sheets";
 
 interface WorkflowNode {
   id: string;
@@ -22,10 +30,16 @@ export class WorkflowEngine {
   private telnyxService: TelnyxService;
   private aiService: OpenAIService;
   private kbService: KnowledgeBaseService;
+  private emailService: EmailService;
+  private googleCalendar: GoogleCalendarService;
+  private googleGmail: GoogleGmailService;
+  private googleDrive: GoogleDriveService;
+  private googleSheets: GoogleSheetsService;
   private activeCalls: Map<
     string,
     {
       systemPrompt: string;
+      toneOfVoice?: string;
       history: { role: "user" | "assistant" | "system"; content: string }[];
       workflowId?: string;
       tenantId?: string;
@@ -37,12 +51,17 @@ export class WorkflowEngine {
     this.telnyxService = new TelnyxService();
     this.aiService = new OpenAIService();
     this.kbService = new KnowledgeBaseService();
+    this.emailService = new EmailService();
+    this.googleCalendar = new GoogleCalendarService();
+    this.googleGmail = new GoogleGmailService();
+    this.googleDrive = new GoogleDriveService();
+    this.googleSheets = new GoogleSheetsService();
   }
 
   /**
    * Entry point for external events (Webhooks, API calls)
    */
-  async trigger(triggerType: string, context: any) {
+  async trigger(triggerType: string, contextData: any) {
     // Find the active workflow for this trigger type and load assigned resources
     const workflow = await prisma.workflow.findFirst({
       where: {
@@ -71,18 +90,68 @@ export class WorkflowEngine {
       return;
     }
 
-    // Add workflow info to context for tenant tracking
-    context.workflowId = workflow.id;
-    context.workflowTenantId = workflow.tenantId;
-    context.workflowResources = {
-      aiConfig: (workflow as any).aiConfig,
-      phoneNumbers: (workflow as any).phoneNumbers.map(
-        (wp: any) => wp.phoneNumber
-      ),
-      documents: (workflow as any).documents.map((wd: any) => wd.document),
-      integrations: (workflow as any).integrations.map(
-        (wi: any) => wi.integration
-      ),
+    // Initialize comprehensive workflow context
+    const context: WorkflowContext = {
+      execution: {
+        id: `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        workflowId: workflow.id,
+        tenantId: workflow.tenantId,
+        startedAt: new Date(),
+      },
+      trigger: {
+        type: triggerType,
+        source: contextData,
+      },
+      variables: {
+        workflow: {},
+        conversation: {},
+        global: {},
+      },
+      customer: {
+        id: contextData.customerId,
+        name: contextData.customerName,
+        email: contextData.customerEmail,
+        phone: contextData.fromNumber || contextData.phoneNumber,
+        metadata: {},
+      },
+      conversation: {
+        id: contextData.conversationId,
+        channel:
+          contextData.type ||
+          (triggerType === "Incoming Call" ? "phone" : "chat"),
+        status: "active",
+        messages: [],
+        lastMessage: contextData.message || contextData.transcript,
+        createdAt: new Date(),
+      },
+      call:
+        contextData.type === "voice"
+          ? {
+              sid: contextData.CallSid,
+              from: contextData.fromNumber || contextData.From,
+              to: contextData.phoneNumber || contextData.To,
+              status: contextData.CallStatus,
+              direction: contextData.Direction,
+            }
+          : undefined,
+      resources: {
+        aiConfig: (workflow as any).aiConfig,
+        phoneNumbers: (workflow as any).phoneNumbers.map(
+          (wp: any) => wp.phoneNumber
+        ),
+        documents: (workflow as any).documents.map((wd: any) => wd.document),
+        integrations: (workflow as any).integrations.map(
+          (wi: any) => wi.integration
+        ),
+      },
+    };
+
+    // Preserve legacy context for backward compatibility
+    const legacyContext = {
+      ...contextData,
+      workflowId: workflow.id,
+      workflowTenantId: workflow.tenantId,
+      workflowResources: context.resources,
     };
 
     // 2. Parse nodes and edges
@@ -104,10 +173,34 @@ export class WorkflowEngine {
     }
 
     // Auto-answer incoming calls
-    if (triggerType === "Incoming Call" && context.callControlId) {
+    if (triggerType === "Incoming Call" && legacyContext.callControlId) {
+      const workflowAiConfig: any = (workflow as any).aiConfig;
+      const workflowToneOfVoice = String(
+        (workflow as any)?.toneOfVoice ?? ""
+      ).trim();
+      const configToneOfVoice = String(
+        workflowAiConfig?.toneOfVoice ?? ""
+      ).trim();
+      const effectiveToneOfVoice = workflowToneOfVoice || configToneOfVoice;
+
+      const businessInfo = String(
+        workflowAiConfig?.businessDescription ?? ""
+      ).trim();
+      let baseSystemPrompt =
+        String(workflowAiConfig?.systemPrompt ?? "").trim() ||
+        "You are a helpful assistant.";
+      if (businessInfo) {
+        baseSystemPrompt = `${baseSystemPrompt}\n\nBusiness Context: ${businessInfo}`;
+      }
+      baseSystemPrompt = applyToneOfVoiceToSystemPrompt(
+        baseSystemPrompt,
+        effectiveToneOfVoice
+      );
+
       // Initialize call state with workflow context
-      this.activeCalls.set(context.callControlId, {
-        systemPrompt: "You are a helpful assistant.",
+      this.activeCalls.set(legacyContext.callControlId, {
+        systemPrompt: baseSystemPrompt,
+        toneOfVoice: effectiveToneOfVoice || undefined,
         history: [],
         workflowId: workflow.id,
         tenantId: workflow.tenantId,
@@ -116,34 +209,47 @@ export class WorkflowEngine {
         ),
       });
 
-      await this.telnyxService.answerCall(context.callControlId);
+      await this.telnyxService.answerCall(legacyContext.callControlId);
 
-      // Speak the greeting if configured in the trigger node
-      const greeting = triggerNode.config?.greeting;
-      if (greeting) {
-        await this.telnyxService.speakText(context.callControlId, greeting);
+      // Resolve variables in greeting
+      const greetingTemplate = triggerNode.config?.greeting;
+      if (greetingTemplate) {
+        const greeting = variableResolver.resolve(greetingTemplate, context);
+        await this.telnyxService.speakText(
+          legacyContext.callControlId,
+          greeting
+        );
         // Transcription will be started when speak.ended event is received
       } else {
         // No greeting, start transcription immediately
-        await this.telnyxService.startTranscription(context.callControlId);
+        await this.telnyxService.startTranscription(
+          legacyContext.callControlId
+        );
       }
     }
 
     // 4. Start execution
-    await this.executeNode(triggerNode, nodes, edges, context);
+    await this.executeNode(triggerNode, nodes, edges, context, legacyContext);
   }
 
   private async executeNode(
     node: WorkflowNode,
     nodes: WorkflowNode[],
     edges: WorkflowEdge[],
-    context: any
+    context: WorkflowContext,
+    legacyContext: any
   ) {
     console.log(
       `[WorkflowEngine] Executing node: ${node.label} (${node.type})`
     );
 
     try {
+      // Resolve variables in node config before execution
+      const resolvedConfig = variableResolver.resolveObject(
+        node.config || {},
+        context
+      );
+
       // --- EXECUTE ACTION ---
       let nextNodeId: string | null = null;
 
@@ -153,13 +259,74 @@ export class WorkflowEngine {
           break;
 
         case "action":
-          await this.handleAction(node, context);
+          await this.handleAction(node, resolvedConfig, context, legacyContext);
           break;
 
         case "condition":
-          // Logic to determine which edge to follow
-          // For now, we'll just take the first one, but this is where "If/Else" logic goes
-          break;
+          // Evaluate condition and determine which path to take
+          const conditionConfig = node.config?.condition as ConditionConfig;
+
+          if (!conditionConfig) {
+            console.warn(
+              `[WorkflowEngine] Condition node ${node.id} has no condition config`
+            );
+            break;
+          }
+
+          const conditionResult = conditionEvaluator.evaluate(
+            conditionConfig,
+            context
+          );
+          console.log(
+            `[WorkflowEngine] Condition ${node.id} evaluated to: ${conditionResult}`
+          );
+
+          // Find outgoing edges for this node
+          const conditionOutgoingEdges = edges.filter(
+            (e) => e.source === node.id
+          );
+
+          console.log(
+            `[WorkflowEngine] Condition has ${conditionOutgoingEdges.length} outgoing edges:`,
+            conditionOutgoingEdges.map((e) => ({
+              id: e.id,
+              label: e.label || "(no label)",
+            }))
+          );
+
+          // Find the appropriate edge based on condition result
+          const targetLabel = conditionResult ? "yes" : "no";
+          const conditionEdge = conditionOutgoingEdges.find(
+            (e) =>
+              e.label?.toLowerCase() === targetLabel ||
+              e.label?.toLowerCase() === String(conditionResult)
+          );
+
+          if (conditionEdge) {
+            const nextNode = nodes.find((n) => n.id === conditionEdge.target);
+            if (nextNode) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              await this.executeNode(
+                nextNode,
+                nodes,
+                edges,
+                context,
+                legacyContext
+              );
+            }
+            return; // Exit early since we handled routing
+          }
+
+          console.warn(
+            `[WorkflowEngine] No matching edge found for condition result: ${conditionResult}.`,
+            `Looking for edge with label "${targetLabel}".`,
+            `Available edges:`,
+            conditionOutgoingEdges
+              .map((e) => `"${e.label || "(unlabeled)"}"`)
+              .join(", "),
+            `\nFIX: Click the edge in the workflow builder and set its label to "${targetLabel}"`
+          );
+          return; // Exit if no matching edge
       }
 
       // --- FIND NEXT NODE ---
@@ -171,62 +338,245 @@ export class WorkflowEngine {
       }
 
       // For simple linear flows, just take the first edge
-      // For conditions, we would select the edge based on the result of handleAction/Condition
+      // For conditions, routing is handled above
       const nextEdge = outgoingEdges[0];
       const nextNode = nodes.find((n) => n.id === nextEdge.target);
 
       if (nextNode) {
         // Add a small delay to prevent race conditions or stack overflows in tight loops
         await new Promise((resolve) => setTimeout(resolve, 100));
-        await this.executeNode(nextNode, nodes, edges, context);
+        await this.executeNode(nextNode, nodes, edges, context, legacyContext);
       }
     } catch (error) {
       console.error(`[WorkflowEngine] Error executing node ${node.id}:`, error);
     }
   }
 
-  private async handleAction(node: WorkflowNode, context: any) {
+  private async handleAction(
+    node: WorkflowNode,
+    config: any,
+    context: WorkflowContext,
+    legacyContext: any
+  ) {
     switch (node.label) {
       case "Send Reply":
       case "Send SMS":
-        const text = node.config?.message || "Hello from ConnectFlo!";
+        // Variables are already resolved in config.message
+        const text = config?.message || "Hello from ConnectFlo!";
 
-        if (context.type === "voice" && context.callControlId) {
-          await this.telnyxService.speakText(context.callControlId, text);
-        } else if (context.phoneNumber || context.fromNumber) {
+        if (legacyContext.type === "voice" && legacyContext.callControlId) {
+          await this.telnyxService.speakText(legacyContext.callControlId, text);
+        } else if (legacyContext.phoneNumber || legacyContext.fromNumber) {
           // context.phoneNumber is the customer, context.fromNumber is our number
           // In a real webhook, these might be reversed depending on direction
           // await this.telnyxService.sendSms(context.fromNumber, context.phoneNumber, text);
         }
         break;
 
+      case "Set Variable":
+        // Set a workflow variable
+        if (config?.variableName && config?.value !== undefined) {
+          variableResolver.set(
+            `variables.workflow.${config.variableName}`,
+            config.value,
+            context
+          );
+          console.log(
+            `[WorkflowEngine] Set variable: ${config.variableName} = ${config.value}`
+          );
+        }
+        break;
+
       case "AI Generate":
-        if (context.type === "voice" && context.callControlId) {
-          const callState = this.activeCalls.get(context.callControlId);
+        if (legacyContext.type === "voice" && legacyContext.callControlId) {
+          const callState = this.activeCalls.get(legacyContext.callControlId);
           if (callState) {
-            // Update system prompt from node config if available
-            if (node.config?.systemPrompt) {
-              callState.systemPrompt = node.config.systemPrompt;
+            // Update system prompt from node config if available (already resolved)
+            if (config?.systemPrompt) {
+              callState.systemPrompt = applyToneOfVoiceToSystemPrompt(
+                config.systemPrompt,
+                callState.toneOfVoice
+              );
             }
 
-            // If there's an initial message to speak, speak it
-            if (node.config?.initialMessage) {
+            // If there's an initial message to speak, speak it (already resolved)
+            if (config?.initialMessage) {
               await this.telnyxService.speakText(
-                context.callControlId,
-                node.config.initialMessage
+                legacyContext.callControlId,
+                config.initialMessage
               );
               // Add to history so AI knows it said it
               callState.history.push({
                 role: "assistant",
-                content: node.config.initialMessage,
+                content: config.initialMessage,
               });
             }
           }
         }
         break;
 
+      case "Send Email":
+        // Send email using Nodemailer
+        const to = String(config?.to ?? "").trim();
+        const subject = String(config?.subject ?? "").trim();
+        const body = String(config?.body ?? "").trim();
+        const isHtml = Boolean(config?.isHtml);
+
+        const missingFields: string[] = [];
+        if (!to) missingFields.push("to");
+        if (!subject) missingFields.push("subject");
+        if (!body) missingFields.push("body");
+        if (missingFields.length > 0) {
+          console.warn(
+            `[WorkflowEngine] Send Email: Missing required field(s): ${missingFields.join(
+              ", "
+            )}`
+          );
+          break;
+        }
+
+        try {
+          await this.emailService.sendEmail({
+            to,
+            subject,
+            body,
+            isHtml,
+            from: config?.from,
+            replyTo: config?.replyTo,
+          });
+          console.log(`[WorkflowEngine] Email sent to ${to}`);
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to send email:", error);
+        }
+        break;
+
       case "Assign Agent":
         // Handle agent assignment
+        break;
+
+      // Google Calendar Actions
+      case "Create Calendar Event":
+        try {
+          const eventResult = await this.googleCalendar.createEvent(
+            context.execution.tenantId,
+            {
+              summary: config?.summary || "Meeting",
+              description: config?.description,
+              startTime: config?.startTime,
+              endTime: config?.endTime,
+              attendees: config?.attendees
+                ?.split(",")
+                .map((e: string) => e.trim()),
+              location: config?.location,
+              timeZone: config?.timeZone,
+            }
+          );
+          console.log(
+            `[WorkflowEngine] Calendar event created: ${eventResult.eventId}`
+          );
+
+          // Store result in context variables
+          variableResolver.set(
+            "variables.workflow.calendarEventId",
+            eventResult.eventId,
+            context
+          );
+          variableResolver.set(
+            "variables.workflow.calendarEventLink",
+            eventResult.htmlLink,
+            context
+          );
+          variableResolver.set(
+            "variables.workflow.meetLink",
+            eventResult.meetLink,
+            context
+          );
+        } catch (error) {
+          console.error(
+            "[WorkflowEngine] Failed to create calendar event:",
+            error
+          );
+        }
+        break;
+
+      // Gmail Actions
+      case "Send Gmail":
+        try {
+          const emailResult = await this.googleGmail.sendEmail(
+            context.execution.tenantId,
+            {
+              to: config?.to,
+              subject: config?.subject || "Message from ConnectFlo",
+              body: config?.body || "",
+              isHtml: config?.isHtml || false,
+              cc: config?.cc,
+              bcc: config?.bcc,
+            }
+          );
+          console.log(`[WorkflowEngine] Gmail sent: ${emailResult.messageId}`);
+
+          variableResolver.set(
+            "variables.workflow.emailMessageId",
+            emailResult.messageId,
+            context
+          );
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to send Gmail:", error);
+        }
+        break;
+
+      // Google Drive Actions
+      case "Upload to Drive":
+        try {
+          const driveResult = await this.googleDrive.uploadFile(
+            context.execution.tenantId,
+            {
+              name: config?.fileName || "document.txt",
+              content: config?.fileContent || "",
+              mimeType: config?.mimeType || "text/plain",
+              folderId: config?.folderId,
+            }
+          );
+          console.log(
+            `[WorkflowEngine] File uploaded to Drive: ${driveResult.fileId}`
+          );
+
+          variableResolver.set(
+            "variables.workflow.driveFileId",
+            driveResult.fileId,
+            context
+          );
+          variableResolver.set(
+            "variables.workflow.driveFileLink",
+            driveResult.webViewLink,
+            context
+          );
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to upload to Drive:", error);
+        }
+        break;
+
+      // Google Sheets Actions
+      case "Add Row to Sheet":
+        try {
+          const sheetResult = await this.googleSheets.appendRow(
+            context.execution.tenantId,
+            config?.spreadsheetId,
+            config?.sheetName || "Sheet1",
+            config?.values || []
+          );
+          console.log(
+            `[WorkflowEngine] Row added to sheet: ${sheetResult.updatedRange}`
+          );
+
+          variableResolver.set(
+            "variables.workflow.sheetUpdatedRange",
+            sheetResult.updatedRange,
+            context
+          );
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to add row to sheet:", error);
+        }
         break;
 
       default:

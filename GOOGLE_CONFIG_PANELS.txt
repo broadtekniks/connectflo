@@ -1,0 +1,334 @@
+// Google Calendar, Gmail, Drive, Sheets configuration panels to be inserted in Workflows.tsx
+
+// Insert these BEFORE the "AI Generate" section (around line 3758)
+
+                    {/* Google Calendar: Create Event */}
+                    {selectedNode.label === "Create Calendar Event" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Event Title
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Meeting with {{customer.name}}"
+                            value={selectedNode.config?.summary || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  summary: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Description (Optional)
+                          </label>
+                          <textarea
+                            rows={3}
+                            placeholder="Event details..."
+                            value={selectedNode.config?.description || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  description: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Start Time
+                            </label>
+                            <input
+                              type="datetime-local"
+                              value={selectedNode.config?.startTime || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    startTime: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              End Time
+                            </label>
+                            <input
+                              type="datetime-local"
+                              value={selectedNode.config?.endTime || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    endTime: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Attendees (Optional)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="{{customer.email}}, team@company.com"
+                            value={selectedNode.config?.attendees || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  attendees: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Comma-separated email addresses
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Gmail: Send Email */}
+                    {selectedNode.label === "Send Gmail" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            To
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="{{customer.email}}"
+                            value={selectedNode.config?.to || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  to: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Subject
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Email subject..."
+                            value={selectedNode.config?.subject || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  subject: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Body
+                          </label>
+                          <textarea
+                            rows={6}
+                            placeholder="Email content..."
+                            value={selectedNode.config?.body || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  body: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedNode.config?.isHtml || false}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    isHtml: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Send as HTML</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Google Drive: Upload File */}
+                    {selectedNode.label === "Upload to Drive" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            File Name
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="conversation-transcript.txt"
+                            value={selectedNode.config?.fileName || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  fileName: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            File Content
+                          </label>
+                          <textarea
+                            rows={4}
+                            placeholder="File content or {{variables.workflow.transcript}}"
+                            value={selectedNode.config?.fileContent || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  fileContent: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                          />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Supports variables for dynamic content
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            MIME Type
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="text/plain"
+                            value={selectedNode.config?.mimeType || "text/plain"}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  mimeType: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Google Sheets: Add Row */}
+                    {selectedNode.label === "Add Row to Sheet" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Spreadsheet ID
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="From spreadsheet URL"
+                            value={selectedNode.config?.spreadsheetId || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  spreadsheetId: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Found in the spreadsheet URL
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Sheet Name
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Sheet1"
+                            value={selectedNode.config?.sheetName || "Sheet1"}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  sheetName: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Row Values (Comma-Separated)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="{{customer.name}}, {{customer.email}}, {{conversation.status}}"
+                            value={selectedNode.config?.valuesString || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  valuesString: e.target.value,
+                                  values: e.target.value.split(',').map(v => v.trim()),
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Each comma-separated value becomes a column
+                          </p>
+                        </div>
+                      </div>
+                    )}
