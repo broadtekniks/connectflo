@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import Sidebar from "./components/Sidebar";
 import Inbox from "./pages/Inbox";
 import Dashboard from "./pages/Dashboard";
+import AgentDashboard from "./pages/AgentDashboard";
 import Settings from "./pages/Settings";
 import Integrations from "./pages/Integrations";
 import KnowledgeBase from "./pages/KnowledgeBase";
@@ -17,6 +18,9 @@ import Terms from "./pages/Terms";
 import Tenants from "./pages/Tenants";
 import CustomerPortal from "./pages/CustomerPortal";
 import TestChat from "./pages/TestChat";
+import Customers from "./pages/Customers";
+import TeamMembers from "./pages/TeamMembers";
+import Billing from "./pages/Billing";
 
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -38,6 +42,9 @@ const App: React.FC = () => {
     if (path.startsWith("/phone-numbers")) return "phone-numbers";
     if (path.startsWith("/knowledge")) return "knowledge";
     if (path.startsWith("/inbox")) return "inbox";
+    if (path.startsWith("/customers")) return "customers";
+    if (path.startsWith("/team")) return "team";
+    if (path.startsWith("/billing")) return "billing";
     if (path.startsWith("/settings")) return "settings";
     if (path.startsWith("/tenants")) return "tenants";
     if (path.startsWith("/test-chat")) return "test-chat";
@@ -64,6 +71,9 @@ const App: React.FC = () => {
       knowledge: "/knowledge",
       "phone-numbers": "/phone-numbers",
       workflows: "/workflows",
+      customers: "/customers",
+      team: "/team",
+      billing: "/billing",
       settings: "/settings",
       "test-chat": "/test-chat",
     };
@@ -152,10 +162,12 @@ const App: React.FC = () => {
     tenants: ["SUPER_ADMIN"],
     inbox: ["TENANT_ADMIN", "AGENT"],
     "phone-numbers": ["SUPER_ADMIN", "TENANT_ADMIN"],
-    workflows: ["TENANT_ADMIN", "AGENT"],
+    workflows: ["TENANT_ADMIN"],
     integrations: ["TENANT_ADMIN"],
-    knowledge: ["TENANT_ADMIN", "AGENT"],
+    knowledge: ["TENANT_ADMIN"],
     customers: ["TENANT_ADMIN", "AGENT"],
+    team: ["TENANT_ADMIN"],
+    billing: ["TENANT_ADMIN"],
     settings: ["SUPER_ADMIN", "TENANT_ADMIN", "AGENT"],
     "test-chat": ["TENANT_ADMIN"],
   };
@@ -187,7 +199,7 @@ const App: React.FC = () => {
       case "inbox":
         return <Inbox />;
       case "dashboard":
-        return <Dashboard />;
+        return userRole === "AGENT" ? <AgentDashboard /> : <Dashboard />;
       case "tenants":
         return <Tenants />;
       case "integrations":
@@ -198,6 +210,12 @@ const App: React.FC = () => {
         return <PhoneNumbers />;
       case "workflows":
         return <Workflows />;
+      case "customers":
+        return <Customers />;
+      case "team":
+        return <TeamMembers />;
+      case "billing":
+        return <Billing />;
       case "settings":
         return <Settings />;
       case "test-chat":

@@ -268,6 +268,15 @@ router.post("/sync", async (req: Request, res: Response) => {
 
     const syncedNumbers = [];
     const skippedNumbers = [];
+    const reassignedNumbers = [];
+
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+    });
+
+    if (!tenant) {
+      return res.status(400).json({ error: "Tenant not found" });
+    }
 
     for (const telnyxNum of telnyxNumbers) {
       // Check if number already exists in DB
@@ -276,7 +285,18 @@ router.post("/sync", async (req: Request, res: Response) => {
       });
 
       if (existing) {
-        skippedNumbers.push(telnyxNum.phone_number);
+        // If the number exists but belongs to a different tenant, reassign it so it becomes visible
+        // to the syncing tenant. This matches the expected behavior when a tenant is syncing their
+        // provider inventory into their own database view.
+        if (existing.tenantId !== tenantId) {
+          const updated = await prisma.phoneNumber.update({
+            where: { id: existing.id },
+            data: { tenantId },
+          });
+          reassignedNumbers.push(updated);
+        } else {
+          skippedNumbers.push(telnyxNum.phone_number);
+        }
         continue;
       }
 
@@ -318,11 +338,6 @@ router.post("/sync", async (req: Request, res: Response) => {
         }
       }
 
-      // Get tenant to determine plan
-      const tenant = await prisma.tenant.findUnique({
-        where: { id: tenantId },
-      });
-
       const wholesaleCost = parseFloat(
         telnyxNum.monthly_recurring_cost || "1.0"
       );
@@ -361,6 +376,7 @@ router.post("/sync", async (req: Request, res: Response) => {
     res.json({
       message: "Sync completed",
       synced: syncedNumbers.length,
+      reassigned: reassignedNumbers.length,
       skipped: skippedNumbers.length,
       numbers: syncedNumbers,
     });
@@ -397,6 +413,15 @@ router.post("/sync-twilio", async (req: Request, res: Response) => {
 
     const syncedNumbers = [];
     const skippedNumbers = [];
+    const reassignedNumbers = [];
+
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+    });
+
+    if (!tenant) {
+      return res.status(400).json({ error: "Tenant not found" });
+    }
 
     for (const twilioNum of twilioNumbers) {
       // Check if number already exists in DB
@@ -405,14 +430,17 @@ router.post("/sync-twilio", async (req: Request, res: Response) => {
       });
 
       if (existing) {
-        skippedNumbers.push(twilioNum.phoneNumber);
+        if (existing.tenantId !== tenantId) {
+          const updated = await prisma.phoneNumber.update({
+            where: { id: existing.id },
+            data: { tenantId },
+          });
+          reassignedNumbers.push(updated);
+        } else {
+          skippedNumbers.push(twilioNum.phoneNumber);
+        }
         continue;
       }
-
-      // Get tenant to determine plan
-      const tenant = await prisma.tenant.findUnique({
-        where: { id: tenantId },
-      });
 
       const wholesaleCost = 1.0; // Twilio default monthly cost
       const setupCost = 1.0; // Twilio default setup cost
@@ -453,6 +481,7 @@ router.post("/sync-twilio", async (req: Request, res: Response) => {
     res.json({
       message: "Twilio sync completed",
       synced: syncedNumbers.length,
+      reassigned: reassignedNumbers.length,
       skipped: skippedNumbers.length,
       numbers: syncedNumbers,
     });

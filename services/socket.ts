@@ -8,9 +8,13 @@ class SocketService {
   connect() {
     if (this.socket) return;
 
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
     this.socket = io(SOCKET_URL, {
       transports: ["websocket"],
       autoConnect: true,
+      auth: { token },
     });
 
     this.socket.on("connect", () => {
@@ -44,6 +48,25 @@ class SocketService {
   offNewMessage() {
     if (this.socket) {
       this.socket.off("new_message");
+    }
+  }
+
+  onTeamMemberCheckinUpdated(
+    callback: (payload: {
+      userId: string;
+      tenantId: string;
+      isCheckedIn: boolean;
+      checkedInAt: string | null;
+    }) => void
+  ) {
+    if (this.socket) {
+      this.socket.on("team_member_checkin_updated", callback);
+    }
+  }
+
+  offTeamMemberCheckinUpdated() {
+    if (this.socket) {
+      this.socket.off("team_member_checkin_updated");
     }
   }
 }

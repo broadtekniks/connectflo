@@ -18,6 +18,8 @@ const Inbox: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [claiming, setClaiming] = useState(false);
+  const [claimMessage, setClaimMessage] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
     type: "ARCHIVE" | "DELETE";
     id: string;
@@ -94,6 +96,41 @@ const Inbox: React.FC = () => {
     fetchConversations();
   }, []);
 
+  const refreshConversations = async () => {
+    const data = await api.conversations.list();
+    setConversations(data);
+    return data;
+  };
+
+  const handleCheckAssignments = async () => {
+    if (!currentUser || currentUser.role !== "AGENT") return;
+
+    setClaiming(true);
+    setClaimMessage(null);
+
+    try {
+      const result = await api.conversations.claimNext();
+      const claimed = result?.claimed;
+
+      if (!claimed) {
+        setClaimMessage("No unassigned chats/calls available.");
+        await refreshConversations();
+        return;
+      }
+
+      setClaimMessage("Assigned a new conversation.");
+      await refreshConversations();
+      setSelectedId(claimed.id);
+    } catch (error) {
+      console.error("Failed to claim next conversation:", error);
+      setClaimMessage(
+        error instanceof Error ? error.message : "Failed to check assignments"
+      );
+    } finally {
+      setClaiming(false);
+    }
+  };
+
   const selectedConversation = conversations.find((c) => c.id === selectedId);
 
   const handleSendMessage = async (text: string, isPrivate: boolean) => {
@@ -149,6 +186,9 @@ const Inbox: React.FC = () => {
         selectedId={selectedId}
         onSelect={setSelectedId}
         currentUser={currentUser}
+        onCheckAssignments={handleCheckAssignments}
+        checkingAssignments={claiming}
+        checkAssignmentsMessage={claimMessage}
       />
       {selectedConversation ? (
         <>

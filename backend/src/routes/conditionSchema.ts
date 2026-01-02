@@ -3,6 +3,17 @@ import { schemaBuilder } from "../services/conditionSchema";
 
 const router = Router();
 
+router.use((req: Request, res: Response, next) => {
+  const user = (req as any).user;
+  if (!user) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  if (user.role !== "TENANT_ADMIN") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  next();
+});
+
 /**
  * Get condition schema for workflow builder
  * Returns available fields and operators for building conditions

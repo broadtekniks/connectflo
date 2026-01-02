@@ -51,6 +51,7 @@ const PhoneNumbers: React.FC = () => {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
   const [tenants, setTenants] = useState<any[]>([]);
   const [showTenantModal, setShowTenantModal] = useState(false);
   const [selectedNumberForTenant, setSelectedNumberForTenant] =
@@ -73,16 +74,20 @@ const PhoneNumbers: React.FC = () => {
 
   // Get user role from localStorage
   let isSuperAdmin = false;
+  let userRole: string | null = null;
   try {
     const userStr = localStorage.getItem("user");
     if (userStr) {
       const user = JSON.parse(userStr);
-      isSuperAdmin = user?.role === "SUPER_ADMIN";
+      userRole = user?.role || null;
+      isSuperAdmin = userRole === "SUPER_ADMIN";
       console.log("User role:", user?.role, "isSuperAdmin:", isSuperAdmin);
     }
   } catch (error) {
     console.error("Failed to parse user from localStorage:", error);
   }
+
+  const canSync = userRole === "SUPER_ADMIN" || userRole === "TENANT_ADMIN";
 
   useEffect(() => {
     loadOwnedNumbers();
@@ -94,10 +99,26 @@ const PhoneNumbers: React.FC = () => {
   const loadOwnedNumbers = async () => {
     try {
       const numbers = await api.phoneNumbers.list();
-      setOwnedNumbers(numbers);
+      // If this tenant has no numbers in DB yet, automatically sync once.
+      // This avoids requiring users to click "Sync Numbers" just to see their inventory.
+      if (numbers.length === 0 && canSync && !autoSyncAttempted) {
+        setAutoSyncAttempted(true);
+        setIsSyncing(true);
+        await Promise.allSettled([
+          api.phoneNumbers.sync(),
+          api.post("/phone-numbers/sync-twilio", {}),
+        ]);
+        const refreshed = await api.phoneNumbers.list();
+        setOwnedNumbers(refreshed);
+      } else {
+        setOwnedNumbers(numbers);
+      }
+
+      const currentNumbers =
+        numbers.length === 0 && canSync ? ownedNumbers : numbers;
 
       // Auto-update regions if any numbers have Unknown or US as region
-      const needsUpdate = numbers.some(
+      const needsUpdate = currentNumbers.some(
         (num) => num.region === "Unknown" || num.region === "US"
       );
 
@@ -117,6 +138,7 @@ const PhoneNumbers: React.FC = () => {
     } catch (error) {
       console.error("Failed to load numbers:", error);
     } finally {
+      setIsSyncing(false);
       setIsLoading(false);
     }
   };
@@ -286,7 +308,7 @@ const PhoneNumbers: React.FC = () => {
       await loadOwnedNumbers();
       setActiveTab("my-numbers");
       setSearchResults((prev) =>
-        prev.filter((n) => n.phoneNumber !== phoneNumber)
+        prev.filter((n) => n.number !== phoneNumber && n.id !== phoneNumber)
       );
     } catch (error) {
       console.error("Purchase failed:", error);
@@ -306,11 +328,13 @@ const PhoneNumbers: React.FC = () => {
 
       let totalSynced = 0;
       let totalSkipped = 0;
+      let totalReassigned = 0;
       const messages: string[] = [];
 
       if (telnyxResult.status === "fulfilled") {
         totalSynced += telnyxResult.value.synced;
         totalSkipped += telnyxResult.value.skipped;
+        totalReassigned += (telnyxResult.value as any).reassigned || 0;
         if (telnyxResult.value.synced > 0) {
           messages.push(`Telnyx: ${telnyxResult.value.synced} synced`);
         }
@@ -321,6 +345,7 @@ const PhoneNumbers: React.FC = () => {
       if (twilioResult.status === "fulfilled") {
         totalSynced += twilioResult.value.synced;
         totalSkipped += twilioResult.value.skipped;
+        totalReassigned += (twilioResult.value as any).reassigned || 0;
         if (twilioResult.value.synced > 0) {
           messages.push(`Twilio: ${twilioResult.value.synced} synced`);
         }
@@ -332,11 +357,15 @@ const PhoneNumbers: React.FC = () => {
 
       const messageText =
         messages.length > 0
-          ? `${messages.join(
-              ", "
-            )}. ${totalSkipped} numbers were already in the database.`
+          ? `${messages.join(", ")}. ${
+              totalReassigned > 0
+                ? `${totalReassigned} reassigned to this tenant, `
+                : ""
+            }${totalSkipped} already existed.`
           : totalSkipped > 0
-          ? `All ${totalSkipped} numbers were already in the database.`
+          ? totalReassigned > 0
+            ? `${totalReassigned} numbers were reassigned to this tenant. ${totalSkipped} already existed.`
+            : `All ${totalSkipped} numbers were already in the database.`
           : "No numbers found to sync.";
 
       setModalState({

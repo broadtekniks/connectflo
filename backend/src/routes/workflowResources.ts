@@ -4,6 +4,14 @@ import { authenticateToken, AuthRequest } from "../middleware/auth";
 
 const router = Router();
 
+router.use((req: Request, res: Response, next) => {
+  const authReq = req as AuthRequest;
+  if (authReq.user?.role !== "TENANT_ADMIN") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  next();
+});
+
 // Get all resources assigned to a workflow
 router.get(
   "/:id/resources",

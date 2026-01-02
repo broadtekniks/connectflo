@@ -19,6 +19,9 @@ interface ConversationListProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   currentUser: User | null;
+  onCheckAssignments?: () => void;
+  checkingAssignments?: boolean;
+  checkAssignmentsMessage?: string | null;
 }
 
 const getChannelIcon = (channel: ChannelType) => {
@@ -39,6 +42,9 @@ const ConversationList: React.FC<ConversationListProps> = ({
   selectedId,
   onSelect,
   currentUser,
+  onCheckAssignments,
+  checkingAssignments,
+  checkAssignmentsMessage,
 }) => {
   const [filter, setFilter] = useState<
     "all" | "mine" | "unassigned" | "archived"
@@ -66,7 +72,30 @@ const ConversationList: React.FC<ConversationListProps> = ({
   return (
     <div className="w-80 bg-white border-r border-slate-200 flex flex-col h-full shrink-0">
       <div className="p-4 border-b border-slate-100">
-        <h2 className="text-xl font-bold text-slate-800 mb-4">Inbox</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold text-slate-800">Inbox</h2>
+          {currentUser?.role === "AGENT" && onCheckAssignments && (
+            <button
+              type="button"
+              onClick={onCheckAssignments}
+              disabled={Boolean(checkingAssignments)}
+              className={`text-xs font-bold px-3 py-1.5 rounded-md border transition-colors ${
+                checkingAssignments
+                  ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+                  : "bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100"
+              }`}
+              title="Check for unassigned chats/calls"
+            >
+              {checkingAssignments ? "Checking…" : "Check"}
+            </button>
+          )}
+        </div>
+
+        {currentUser?.role === "AGENT" && checkAssignmentsMessage && (
+          <div className="mb-3 text-xs text-slate-500">
+            {checkAssignmentsMessage}
+          </div>
+        )}
         <div className="flex gap-2 mb-3">
           <div className="relative flex-1">
             <Search

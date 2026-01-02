@@ -6,8 +6,6 @@ import {
   Globe,
   Building,
   Bot,
-  Users,
-  CreditCard,
   Save,
   Upload,
   Mic,
@@ -378,58 +376,16 @@ const IntentManagement: React.FC = () => {
   );
 };
 
-const TEAM_MEMBERS = [
-  {
-    id: 1,
-    name: "Sarah Jenkins",
-    email: "sarah@connectflo.com",
-    role: "Admin",
-    status: "Active",
-    avatar: "https://picsum.photos/id/1005/100/100",
-  },
-  {
-    id: 2,
-    name: "Mike Chen",
-    email: "mike@connectflo.com",
-    role: "Agent",
-    status: "Active",
-    avatar: "https://picsum.photos/id/1012/100/100",
-  },
-  {
-    id: 3,
-    name: "Jessica Alva",
-    email: "jessica@connectflo.com",
-    role: "Agent",
-    status: "Invited",
-    avatar: "https://picsum.photos/id/1027/100/100",
-  },
-];
-
 const Settings: React.FC = () => {
-  const [activeTab, setActiveTab] = useState("installation");
+  const [activeTab, setActiveTab] = useState("general");
   const [user, setUser] = useState<UserType | null>(null);
   const [tenant, setTenant] = useState<any>(null);
-  const [teamMembers, setTeamMembers] = useState(TEAM_MEMBERS);
 
   useEffect(() => {
     const userStr = localStorage.getItem("user");
     if (userStr) {
       const userData = JSON.parse(userStr);
       setUser(userData);
-
-      // Update first team member to match logged in user for demo purposes
-      setTeamMembers((prev) => [
-        {
-          ...prev[0],
-          name: userData.name,
-          email: userData.email,
-          role: userData.role === "TENANT_ADMIN" ? "Admin" : "Agent",
-          avatar:
-            userData.avatar ||
-            `https://ui-avatars.com/api/?name=${userData.name}`,
-        },
-        ...prev.slice(1),
-      ]);
 
       if (userData.tenantId) {
         api.tenants.get(userData.tenantId).then(setTenant).catch(console.error);
@@ -618,18 +574,61 @@ const Settings: React.FC = () => {
     });
   };
 
-  const tabs = [
-    { id: "general", label: "General", icon: User },
-    { id: "organization", label: "Organization", icon: Building },
-    { id: "ai-agent", label: "AI Agent", icon: Bot },
-    { id: "installation", label: "Installation", icon: Code },
-    { id: "team", label: "Team Members", icon: Users },
-    { id: "billing", label: "Billing & Usage", icon: CreditCard },
-    { id: "security", label: "Security", icon: Shield },
-    ...(user?.role === "SUPER_ADMIN"
-      ? [{ id: "plans", label: "Plans", icon: PackageOpen }]
-      : []),
+  const allTabs: Array<{
+    id: string;
+    label: string;
+    icon: any;
+    roles: Array<"SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER">;
+  }> = [
+    {
+      id: "general",
+      label: "General",
+      icon: User,
+      roles: ["SUPER_ADMIN", "TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "organization",
+      label: "Organization",
+      icon: Building,
+      roles: ["TENANT_ADMIN"],
+    },
+    {
+      id: "ai-agent",
+      label: "AI Agent",
+      icon: Bot,
+      roles: ["TENANT_ADMIN"],
+    },
+    {
+      id: "installation",
+      label: "Installation",
+      icon: Code,
+      roles: ["TENANT_ADMIN"],
+    },
+    {
+      id: "security",
+      label: "Security",
+      icon: Shield,
+      roles: ["SUPER_ADMIN", "TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "plans",
+      label: "Plans",
+      icon: PackageOpen,
+      roles: ["SUPER_ADMIN"],
+    },
   ];
+
+  const tabs = allTabs.filter((t) =>
+    t.roles.includes((user?.role || "AGENT") as any)
+  );
+
+  useEffect(() => {
+    if (!user) return;
+    const allowedIds = new Set(tabs.map((t) => t.id));
+    if (!allowedIds.has(activeTab)) {
+      setActiveTab(tabs[0]?.id || "general");
+    }
+  }, [user, activeTab, tabs]);
 
   return (
     <div className="flex-1 bg-slate-50 h-full flex overflow-hidden">
@@ -1228,182 +1227,6 @@ const Settings: React.FC = () => {
                     </p>
                   </div>
                 )}
-              </div>
-            </div>
-          )}
-
-          {/* --- GENERAL --- */}
-          {activeTab === "team" && (
-            <div className="space-y-8 animate-fade-in">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-xl font-bold text-slate-900">
-                    Team Management
-                  </h2>
-                  <p className="text-slate-500">
-                    Manage access and roles for your support team.
-                  </p>
-                </div>
-                <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-sm">
-                  <Plus size={16} /> Invite Member
-                </button>
-              </div>
-
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-100">
-                    <tr>
-                      <th className="px-6 py-3 font-semibold">User</th>
-                      <th className="px-6 py-3 font-semibold">Role</th>
-                      <th className="px-6 py-3 font-semibold">Status</th>
-                      <th className="px-6 py-3 font-semibold text-right">
-                        Actions
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {teamMembers.map((member) => (
-                      <tr key={member.id} className="hover:bg-slate-50">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <img
-                              src={member.avatar}
-                              alt=""
-                              className="w-8 h-8 rounded-full"
-                            />
-                            <div>
-                              <div className="font-bold text-slate-800">
-                                {member.name}
-                              </div>
-                              <div className="text-xs text-slate-500">
-                                {member.email}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="inline-block bg-slate-100 text-slate-700 px-2 py-1 rounded text-xs font-bold border border-slate-200">
-                            {member.role}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span
-                            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium ${
-                              member.status === "Active"
-                                ? "bg-green-50 text-green-700"
-                                : "bg-amber-50 text-amber-700"
-                            }`}
-                          >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                member.status === "Active"
-                                  ? "bg-green-500"
-                                  : "bg-amber-500"
-                              }`}
-                            ></span>
-                            {member.status}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right">
-                          <button className="text-slate-400 hover:text-red-600 transition-colors">
-                            <Trash2 size={16} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* --- BILLING --- */}
-          {activeTab === "billing" && (
-            <div className="space-y-8 animate-fade-in">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">
-                  Billing & Usage
-                </h2>
-                <p className="text-slate-500">
-                  Manage your subscription plan and monitor AI costs.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-                  <div className="flex justify-between items-start mb-6">
-                    <div>
-                      <h3 className="font-bold text-slate-800 text-lg">
-                        Pro Plan
-                      </h3>
-                      <p className="text-sm text-slate-500">
-                        $49 / month • Billed Monthly
-                      </p>
-                    </div>
-                    <span className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide">
-                      Active
-                    </span>
-                  </div>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-sm font-medium text-slate-700 mb-1">
-                        <span>Voice Minutes</span>
-                        <span>850 / 1,000</span>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                        <div
-                          className="bg-indigo-500 h-full rounded-full"
-                          style={{ width: "85%" }}
-                        ></div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm font-medium text-slate-700 mb-1">
-                        <span>AI Tokens</span>
-                        <span>2.4M / 5.0M</span>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                        <div
-                          className="bg-purple-500 h-full rounded-full"
-                          style={{ width: "48%" }}
-                        ></div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-8 flex gap-3">
-                    <button className="text-sm font-bold text-indigo-600 border border-indigo-200 bg-indigo-50 px-4 py-2 rounded-lg hover:bg-indigo-100">
-                      Upgrade Plan
-                    </button>
-                    <button className="text-sm font-medium text-slate-600 hover:text-slate-900 px-4 py-2">
-                      View Invoices
-                    </button>
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between">
-                  <div>
-                    <h3 className="font-bold text-slate-800 mb-4">
-                      Payment Method
-                    </h3>
-                    <div className="flex items-center gap-3 p-3 border border-slate-200 rounded-lg bg-slate-50">
-                      <div className="w-10 h-6 bg-slate-200 rounded flex items-center justify-center">
-                        <div className="w-4 h-4 rounded-full bg-red-500 opacity-50"></div>
-                        <div className="w-4 h-4 rounded-full bg-yellow-500 opacity-50 -ml-2"></div>
-                      </div>
-                      <div>
-                        <div className="text-sm font-bold text-slate-700">
-                          •••• 4242
-                        </div>
-                        <div className="text-xs text-slate-400">
-                          Expires 12/25
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <button className="w-full mt-4 border border-slate-200 text-slate-600 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
-                    Update Card
-                  </button>
-                </div>
               </div>
             </div>
           )}

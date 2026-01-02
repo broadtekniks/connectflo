@@ -54,6 +54,73 @@ const handleAuthFailureIfNeeded = (status: number, message: string) => {
 };
 
 export const api = {
+  agents: {
+    me: async (): Promise<{
+      isCheckedIn: boolean;
+      checkedInAt: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/agents/me`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch agent status";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    checkIn: async (): Promise<{
+      isCheckedIn: boolean;
+      checkedInAt: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/agents/check-in`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to check in";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    checkOut: async (): Promise<{
+      isCheckedIn: boolean;
+      checkedInAt: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/agents/check-out`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to check out";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+  },
+
   conversations: {
     list: async (): Promise<Conversation[]> => {
       const response = await fetch(`${API_URL}/conversations`, {
@@ -102,6 +169,25 @@ export const api = {
       });
       if (!response.ok) throw new Error("Failed to delete conversation");
     },
+
+    claimNext: async (): Promise<{ claimed: Conversation | null }> => {
+      const response = await fetch(`${API_URL}/conversations/claim-next`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to claim next conversation";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
   },
 
   tenants: {
@@ -141,6 +227,68 @@ export const api = {
         body: JSON.stringify({ tenantId }),
       });
       if (!response.ok) throw new Error("Failed to create test customer");
+      return response.json();
+    },
+  },
+
+  customers: {
+    list: async (): Promise<
+      Array<{
+        id: string;
+        name: string;
+        email: string;
+        avatar?: string;
+        role: "CUSTOMER";
+        tenantId?: string;
+        createdAt: string;
+      }>
+    > => {
+      const response = await fetch(`${API_URL}/customers`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch customers";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+  },
+
+  teamMembers: {
+    list: async (): Promise<
+      Array<{
+        id: string;
+        name: string | null;
+        email: string;
+        avatar?: string | null;
+        role: "TENANT_ADMIN" | "AGENT";
+        tenantId?: string;
+        createdAt: string;
+        isCheckedIn: boolean;
+        checkedInAt: string | null;
+      }>
+    > => {
+      const response = await fetch(`${API_URL}/team-members`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch team members";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
       return response.json();
     },
   },
@@ -483,6 +631,24 @@ export const api = {
         headers: authHeader(),
       });
       if (!response.ok) throw new Error("Failed to fetch metrics");
+      return response.json();
+    },
+
+    agent: async (): Promise<{
+      assignedActiveConversations: number;
+      assignedOpenConversations: number;
+      assignedPendingConversations: number;
+      resolvedToday: number;
+      agentMessagesToday: number;
+      voiceCallsToday: number;
+      voiceMinutesToday: number;
+      isCheckedIn: boolean;
+      checkedInAt: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/metrics/agent`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch agent metrics");
       return response.json();
     },
   },

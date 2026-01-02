@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 
 import {
   PrismaClient,
@@ -21,6 +22,10 @@ const prisma = new PrismaClient({ adapter });
 async function main() {
   console.log("Start seeding ...");
   const password = await bcrypt.hash("password123", 10);
+
+  // Stable tenant id for the platform/admin tenant (avoids relying on a slug).
+  // NOTE: This is intended for dev/seeded environments.
+  const PLATFORM_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
   // -1. Create Plans
   await prisma.plan.upsert({
@@ -159,13 +164,33 @@ async function main() {
 
   console.log("Created pricing tiers");
 
-  // 0. Create Tenant
-  const tenant = await prisma.tenant.upsert({
-    where: { slug: "acme-corp" },
-    update: {},
+  // 0. Create platform tenant with stable UUID
+  // We still provide a slug for human readability, but we do not *depend* on it.
+  const platformTenant = await prisma.tenant.upsert({
+    where: { id: PLATFORM_TENANT_ID },
+    update: {
+      name: "ConnectFlo Platform",
+      slug: "connectflo-platform",
+      plan: "ENTERPRISE",
+      status: "ACTIVE",
+    },
     create: {
+      id: PLATFORM_TENANT_ID,
+      name: "ConnectFlo Platform",
+      slug: "connectflo-platform",
+      plan: "ENTERPRISE",
+      status: "ACTIVE",
+    },
+  });
+
+  // Demo/customer tenant (where tenant admins, agents, customers live)
+  // This intentionally uses a random UUID (Prisma default) like the app.
+  // Because `Tenant.slug` is unique, generate a unique demo slug each run.
+  const demoSlug = `acme-corp-${crypto.randomUUID().slice(0, 8)}`;
+  const demoTenant = await prisma.tenant.create({
+    data: {
       name: "Acme Corp",
-      slug: "acme-corp",
+      slug: demoSlug,
       plan: "ENTERPRISE",
       status: "ACTIVE",
     },
@@ -176,6 +201,8 @@ async function main() {
     where: { email: "admin@connectflo.com" },
     update: {
       password,
+      tenantId: platformTenant.id,
+      role: Role.SUPER_ADMIN,
     },
     create: {
       email: "admin@connectflo.com",
@@ -183,46 +210,46 @@ async function main() {
       name: "Alice Admin",
       role: Role.SUPER_ADMIN,
       avatar: "https://i.pravatar.cc/150?u=admin",
-      tenantId: tenant.id,
+      tenantId: platformTenant.id,
     },
   });
 
   const tenantAdmin = await prisma.user.upsert({
     where: { email: "manager@connectflo.com" },
-    update: { password },
+    update: { password, tenantId: demoTenant.id, role: Role.TENANT_ADMIN },
     create: {
       email: "manager@connectflo.com",
       password,
       name: "Tom Tenant Admin",
       role: Role.TENANT_ADMIN,
       avatar: "https://i.pravatar.cc/150?u=manager",
-      tenantId: tenant.id,
+      tenantId: demoTenant.id,
     },
   });
 
   const agent = await prisma.user.upsert({
     where: { email: "agent@connectflo.com" },
-    update: { password },
+    update: { password, tenantId: demoTenant.id, role: Role.AGENT },
     create: {
       email: "agent@connectflo.com",
       password,
       name: "Bob Agent",
       role: Role.AGENT,
       avatar: "https://i.pravatar.cc/150?u=agent",
-      tenantId: tenant.id,
+      tenantId: demoTenant.id,
     },
   });
 
   const customer = await prisma.user.upsert({
     where: { email: "customer@example.com" },
-    update: { password },
+    update: { password, tenantId: demoTenant.id, role: Role.CUSTOMER },
     create: {
       email: "customer@example.com",
       password,
       name: "Charlie Customer",
       role: Role.CUSTOMER,
       avatar: "https://i.pravatar.cc/150?u=customer",
-      tenantId: tenant.id,
+      tenantId: demoTenant.id,
     },
   });
 
@@ -237,6 +264,7 @@ async function main() {
       priority: "HIGH",
       sentiment: Sentiment.NEGATIVE,
       tags: ["billing", "urgent"],
+      tenantId: demoTenant.id,
       customerId: customer.id,
       assigneeId: agent.id,
       messages: {
@@ -244,11 +272,13 @@ async function main() {
           {
             content: "Hi, I was charged twice for my subscription.",
             sender: MessageSender.CUSTOMER,
+            tenantId: demoTenant.id,
           },
           {
             content:
               "I apologize for the inconvenience. Let me check that for you.",
             sender: MessageSender.AGENT,
+            tenantId: demoTenant.id,
           },
         ],
       },
@@ -263,12 +293,14 @@ async function main() {
       priority: "LOW",
       sentiment: Sentiment.NEUTRAL,
       tags: ["feature-request"],
+      tenantId: demoTenant.id,
       customerId: customer.id,
       messages: {
         create: [
           {
             content: "It would be great if you had a dark mode.",
             sender: MessageSender.CUSTOMER,
+            tenantId: demoTenant.id,
           },
         ],
       },

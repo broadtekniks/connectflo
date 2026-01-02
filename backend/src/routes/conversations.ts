@@ -95,6 +95,93 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
+// Agent: claim the next unassigned chat/voice conversation
+router.post("/claim-next", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+
+  try {
+    const tenantId = authReq.user?.tenantId as string | undefined;
+    const userId = authReq.user?.userId as string | undefined;
+    const role = authReq.user?.role as string | undefined;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    if (!userId) {
+      return res.status(400).json({ error: "User ID not found in token" });
+    }
+
+    if (role !== "AGENT") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const tryClaim = async () => {
+      const next = await prisma.conversation.findFirst({
+        where: {
+          tenantId,
+          status: ConversationStatus.OPEN,
+          assigneeId: null,
+          channel: {
+            in: [ChannelType.CHAT, ChannelType.VOICE],
+          },
+        },
+        orderBy: {
+          lastActivity: "asc",
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!next) return null;
+
+      const updated = await prisma.conversation.updateMany({
+        where: {
+          id: next.id,
+          tenantId,
+          assigneeId: null,
+        },
+        data: {
+          assigneeId: userId,
+        },
+      });
+
+      if (updated.count !== 1) return null;
+
+      const conversation = await prisma.conversation.findFirst({
+        where: { id: next.id, tenantId },
+        include: {
+          customer: true,
+          assignee: true,
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+      });
+
+      if (!conversation) return null;
+
+      return {
+        ...conversation,
+        messages: conversation.messages.map((msg: any) => ({
+          ...msg,
+          timestamp: msg.createdAt.toISOString(),
+        })),
+      };
+    };
+
+    // Best-effort in case of race (someone else claims first)
+    const claimed = (await tryClaim()) || (await tryClaim());
+
+    res.json({ claimed });
+  } catch (error) {
+    console.error("Error claiming next conversation:", error);
+    res.status(500).json({ error: "Failed to claim next conversation" });
+  }
+});
+
 // Create conversation
 router.post("/", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;

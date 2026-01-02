@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Inbox,
   Settings,
   Users,
+  CreditCard,
   BookOpen,
   Workflow,
   Blocks,
@@ -13,6 +14,8 @@ import {
   MessageSquare,
   Menu,
 } from "lucide-react";
+
+import { api } from "../services/api";
 
 interface SidebarProps {
   currentView: string;
@@ -33,6 +36,36 @@ const Sidebar: React.FC<SidebarProps> = ({
   isCollapsed,
   onToggleCollapsed,
 }) => {
+  const [agentCheckedIn, setAgentCheckedIn] = useState<boolean>(false);
+  const [agentBusy, setAgentBusy] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (userRole !== "AGENT") return;
+
+    api.agents
+      .me()
+      .then((res) => setAgentCheckedIn(Boolean(res.isCheckedIn)))
+      .catch((err) => {
+        console.error("Failed to load agent check-in status", err);
+      });
+  }, [userRole]);
+
+  const handleToggleCheckIn = async () => {
+    if (userRole !== "AGENT") return;
+
+    setAgentBusy(true);
+    try {
+      const next = agentCheckedIn
+        ? await api.agents.checkOut()
+        : await api.agents.checkIn();
+      setAgentCheckedIn(Boolean(next.isCheckedIn));
+    } catch (err) {
+      console.error("Failed to toggle agent check-in", err);
+    } finally {
+      setAgentBusy(false);
+    }
+  };
+
   const navItems = [
     {
       id: "dashboard",
@@ -57,7 +90,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       id: "workflows",
       label: "Workflows",
       icon: Workflow,
-      roles: ["TENANT_ADMIN", "AGENT"],
+      roles: ["TENANT_ADMIN"],
     },
     {
       id: "integrations",
@@ -69,13 +102,25 @@ const Sidebar: React.FC<SidebarProps> = ({
       id: "knowledge",
       label: "Knowledge",
       icon: BookOpen,
-      roles: ["TENANT_ADMIN", "AGENT"],
+      roles: ["TENANT_ADMIN"],
     },
     {
       id: "customers",
       label: "Customers",
       icon: Users,
       roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "team",
+      label: "Team",
+      icon: Users,
+      roles: ["TENANT_ADMIN"],
+    },
+    {
+      id: "billing",
+      label: "Billing",
+      icon: CreditCard,
+      roles: ["TENANT_ADMIN"],
     },
     {
       id: "settings",
@@ -87,7 +132,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       id: "test-chat",
       label: "Test Chat",
       icon: MessageSquare,
-      roles: ["TENANT_ADMIN", "AGENT"],
+      roles: ["TENANT_ADMIN"],
     },
   ];
 
@@ -153,6 +198,38 @@ const Sidebar: React.FC<SidebarProps> = ({
           </button>
         ))}
       </nav>
+
+      {userRole === "AGENT" && (
+        <div className="px-3 pb-4">
+          <button
+            type="button"
+            onClick={handleToggleCheckIn}
+            disabled={agentBusy}
+            className={`w-full flex items-center justify-center px-3 py-2 rounded-lg border text-sm font-bold transition-colors ${
+              agentBusy
+                ? "bg-slate-800 text-slate-400 border-slate-700 cursor-not-allowed"
+                : agentCheckedIn
+                ? "bg-indigo-600 text-white border-indigo-500 hover:bg-indigo-700"
+                : "bg-slate-800 text-white border-slate-700 hover:bg-slate-700"
+            } ${isCollapsed ? "px-0" : ""}`}
+            title={
+              agentCheckedIn
+                ? "Check out (stop receiving new assignments)"
+                : "Check in (start receiving new assignments)"
+            }
+          >
+            {isCollapsed ? (
+              <span className="text-xs">{agentCheckedIn ? "OUT" : "IN"}</span>
+            ) : agentBusy ? (
+              "Working…"
+            ) : agentCheckedIn ? (
+              "Check out"
+            ) : (
+              "Check in"
+            )}
+          </button>
+        </div>
+      )}
 
       <div className="p-4 border-t border-slate-800">
         <div className="flex items-center justify-between">

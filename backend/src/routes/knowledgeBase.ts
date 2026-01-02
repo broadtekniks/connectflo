@@ -9,6 +9,14 @@ const router = Router();
 const kbService = new KnowledgeBaseService();
 const storageService = new StorageService();
 
+router.use((req: Request, res: Response, next) => {
+  const authReq = req as AuthRequest;
+  if (authReq.user?.role !== "TENANT_ADMIN") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  next();
+});
+
 // Configure storage (Memory for R2 upload)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });

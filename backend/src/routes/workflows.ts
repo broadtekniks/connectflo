@@ -6,6 +6,14 @@ import { AuthRequest } from "../middleware/auth";
 const router = Router();
 const workflowEngine = new WorkflowEngine();
 
+router.use((req: Request, res: Response, next) => {
+  const authReq = req as AuthRequest;
+  if (authReq.user?.role !== "TENANT_ADMIN") {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  next();
+});
+
 // Get all workflows
 router.get("/", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;

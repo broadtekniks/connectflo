@@ -5,6 +5,7 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import jwt from "jsonwebtoken";
 import prisma from "./lib/prisma";
 import conversationRoutes from "./routes/conversations";
 import messageRoutes from "./routes/messages";
@@ -23,6 +24,9 @@ import authRoutes from "./routes/auth";
 import metricsRoutes from "./routes/metrics";
 import planRoutes from "./routes/plans";
 import usageRoutes from "./routes/usage";
+import customerRoutes from "./routes/customers";
+import teamMemberRoutes from "./routes/teamMembers";
+import agentRoutes from "./routes/agents";
 import { voiceRouter, initializeVoiceWebSocket } from "./routes/voice";
 import voiceConfigRoutes from "./routes/voiceConfig";
 import conditionSchemaRoutes from "./routes/conditionSchema";
@@ -31,6 +35,7 @@ import { authenticateToken } from "./middleware/auth";
 
 const app = express();
 const port = process.env.PORT || 3002;
+const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
 
 // Allow Twilio webhooks to bypass ngrok browser warning
 app.use((req, res, next) => {
@@ -74,6 +79,9 @@ httpServer.on("upgrade", (request, socket, head) => {
     voiceWss.handleUpgrade(request, socket, head, (ws) => {
       voiceWss.emit("connection", ws, request);
     });
+  } else if (pathname?.startsWith("/socket.io")) {
+    // Let Socket.IO handle its own upgrade requests.
+    return;
   } else {
     console.log(`[Server] Unknown WebSocket path: ${pathname}`);
     socket.destroy();
@@ -82,6 +90,26 @@ httpServer.on("upgrade", (request, socket, head) => {
 
 // Make io accessible to routes
 app.set("io", io);
+
+// Authenticate Socket.IO connections using the same JWT as the API.
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token as string | undefined;
+    if (!token) return next(new Error("Unauthorized"));
+
+    const verified = jwt.verify(token, JWT_SECRET) as any;
+    socket.data.user = verified;
+
+    const tenantId = verified?.tenantId as string | undefined;
+    if (tenantId) {
+      socket.join(`tenant:${tenantId}`);
+    }
+
+    return next();
+  } catch {
+    return next(new Error("Unauthorized"));
+  }
+});
 
 app.use("/api/conversations", authenticateToken, conversationRoutes);
 app.use("/api/messages", authenticateToken, messageRoutes);
@@ -94,6 +122,9 @@ app.use("/api/tenants", authenticateToken, tenantRoutes);
 app.use("/api/ai-config", authenticateToken, aiConfigRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/metrics", authenticateToken, metricsRoutes);
+app.use("/api/customers", authenticateToken, customerRoutes);
+app.use("/api/team-members", authenticateToken, teamMemberRoutes);
+app.use("/api/agents", authenticateToken, agentRoutes);
 app.use("/api/plans", authenticateToken, planRoutes);
 app.use("/api/usage", authenticateToken, usageRoutes);
 app.use("/api/voice", authenticateToken, voiceRouter);
