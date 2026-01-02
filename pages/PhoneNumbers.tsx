@@ -298,21 +298,59 @@ const PhoneNumbers: React.FC = () => {
   const handleSync = async () => {
     setIsSyncing(true);
     try {
-      const result = await api.phoneNumbers.sync();
+      // Sync both Telnyx and Twilio numbers
+      const [telnyxResult, twilioResult] = await Promise.allSettled([
+        api.phoneNumbers.sync(),
+        api.post("/phone-numbers/sync-twilio", {}),
+      ]);
+
+      let totalSynced = 0;
+      let totalSkipped = 0;
+      const messages: string[] = [];
+
+      if (telnyxResult.status === "fulfilled") {
+        totalSynced += telnyxResult.value.synced;
+        totalSkipped += telnyxResult.value.skipped;
+        if (telnyxResult.value.synced > 0) {
+          messages.push(`Telnyx: ${telnyxResult.value.synced} synced`);
+        }
+      } else {
+        console.error("Telnyx sync failed:", telnyxResult.reason);
+      }
+
+      if (twilioResult.status === "fulfilled") {
+        totalSynced += twilioResult.value.synced;
+        totalSkipped += twilioResult.value.skipped;
+        if (twilioResult.value.synced > 0) {
+          messages.push(`Twilio: ${twilioResult.value.synced} synced`);
+        }
+      } else {
+        console.error("Twilio sync failed:", twilioResult.reason);
+      }
+
       await loadOwnedNumbers();
+
+      const messageText =
+        messages.length > 0
+          ? `${messages.join(
+              ", "
+            )}. ${totalSkipped} numbers were already in the database.`
+          : totalSkipped > 0
+          ? `All ${totalSkipped} numbers were already in the database.`
+          : "No numbers found to sync.";
+
       setModalState({
         isOpen: true,
-        title: "Sync Successful",
-        message: `Synced ${result.synced} numbers from Telnyx. ${result.skipped} numbers were already in the database.`,
-        type: "success",
+        title: "Sync Complete",
+        message: messageText,
+        type: totalSynced > 0 ? "success" : "info",
       });
     } catch (error) {
       console.error("Sync failed:", error);
       setModalState({
         isOpen: true,
         title: "Sync Failed",
-        message:
-          "Failed to sync numbers from Telnyx. Please check your API configuration.",
+        message: "Failed to sync numbers. Please check your API configuration.",
         type: "error",
       });
     } finally {
@@ -338,7 +376,7 @@ const PhoneNumbers: React.FC = () => {
                 onClick={handleSync}
                 disabled={isSyncing}
                 className="px-3 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg text-sm font-medium hover:bg-slate-50 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Sync numbers from Telnyx"
+                title="Sync numbers from Telnyx and Twilio"
               >
                 <RefreshCw
                   size={14}

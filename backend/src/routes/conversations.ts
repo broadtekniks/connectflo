@@ -134,6 +134,7 @@ router.post("/", async (req: Request, res: Response) => {
             content: initialMessage,
             sender: "CUSTOMER",
             conversationId: conversation.id,
+            tenantId,
           },
         });
       }
@@ -141,8 +142,8 @@ router.post("/", async (req: Request, res: Response) => {
       return conversation;
     });
 
-    const fullConversation = await prisma.conversation.findUnique({
-      where: { id: result.id },
+    const fullConversation = await prisma.conversation.findFirst({
+      where: { id: result.id, tenantId },
       include: {
         customer: true,
         messages: true,
@@ -189,8 +190,8 @@ router.patch("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
-    const conversation = await prisma.conversation.update({
-      where: { id },
+    await prisma.conversation.updateMany({
+      where: { id, tenantId },
       data: {
         status: status as ConversationStatus,
         assigneeId,
@@ -198,11 +199,16 @@ router.patch("/:id", async (req: Request, res: Response) => {
         sentiment: sentiment as Sentiment,
         tags,
       },
-      include: {
-        customer: true,
-        assignee: true,
-      },
     });
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id, tenantId },
+      include: { customer: true, assignee: true },
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
 
     res.json(conversation);
   } catch (error) {
@@ -231,8 +237,8 @@ router.delete("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Conversation not found" });
     }
 
-    await prisma.conversation.delete({
-      where: { id },
+    await prisma.conversation.deleteMany({
+      where: { id, tenantId },
     });
 
     res.status(204).send();

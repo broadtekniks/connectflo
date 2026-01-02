@@ -6,6 +6,56 @@ import prisma from "../lib/prisma";
 
 const router = Router();
 const workflowEngine = new WorkflowEngine();
+
+function normalizeKeywordList(keywords: unknown): string[] {
+  if (Array.isArray(keywords)) {
+    return keywords
+      .map((k) => String(k || "").trim())
+      .filter((k) => k.length > 0);
+  }
+
+  if (typeof keywords === "string") {
+    return keywords
+      .split(",")
+      .map((k) => k.trim())
+      .filter((k) => k.length > 0);
+  }
+
+  return [];
+}
+
+function detectIntentFromConfiguredIntents(
+  messageText: string,
+  rawIntents: unknown
+): string {
+  const fallback = "general_inquiry";
+  const text = String(messageText || "").toLowerCase();
+
+  if (!Array.isArray(rawIntents)) return fallback;
+
+  const intents = rawIntents
+    .map((intent: any) => {
+      const id = String(intent?.id || intent?.name || "").trim();
+      const enabled = intent?.enabled !== false;
+      const keywords = normalizeKeywordList(intent?.keywords);
+      return { id, enabled, keywords };
+    })
+    .filter((i) => i.enabled && i.id.length > 0);
+
+  for (const intent of intents) {
+    for (const keyword of intent.keywords) {
+      const kw = keyword.toLowerCase();
+      if (kw && text.includes(kw)) {
+        return intent.id;
+      }
+    }
+  }
+
+  // Prefer explicit general intent if present, otherwise first enabled.
+  const general = intents.find((i) => i.id === fallback);
+  if (general) return fallback;
+  return intents[0]?.id || fallback;
+}
 const telnyxService = new TelnyxService();
 
 // Feature flag: use hybrid voice (GPT-4 + Telnyx TTS/STT) or legacy workflow
@@ -98,68 +148,52 @@ router.post("/telnyx", async (req: Request, res: Response) => {
         },
       });
 
-      // Classify intent using simple keyword matching (can be enhanced with AI)
-      const messageText = String(payload.text || "").toLowerCase();
-      let detectedIntent = "general_inquiry";
+      // Classify intent using tenant-configured intents (keyword matching fallback)
+      const messageText = String(payload.text || "");
 
-      if (
-        messageText.includes("cancel") ||
-        messageText.includes("unsubscribe") ||
-        messageText.includes("stop")
-      ) {
-        detectedIntent = "cancel_subscription";
-      } else if (
-        messageText.includes("refund") ||
-        messageText.includes("money back")
-      ) {
-        detectedIntent = "request_refund";
-      } else if (
-        messageText.includes("bill") ||
-        messageText.includes("payment") ||
-        messageText.includes("charge")
-      ) {
-        detectedIntent = "billing_question";
-      } else if (
-        messageText.includes("help") ||
-        messageText.includes("support") ||
-        messageText.includes("issue") ||
-        messageText.includes("problem")
-      ) {
-        detectedIntent = "technical_support";
-      }
+      const aiConfig = await prisma.aiConfig.findUnique({
+        where: { tenantId: phoneNumber.tenantId },
+        select: { intents: true },
+      });
+
+      const detectedIntent = detectIntentFromConfiguredIntents(
+        messageText,
+        aiConfig?.intents
+      );
 
       // Classify sentiment using simple keyword matching (can be enhanced with AI)
+      const lowerText = messageText.toLowerCase();
       let detectedSentiment = "neutral";
 
       // Check for negative sentiment indicators
       if (
-        messageText.includes("angry") ||
-        messageText.includes("frustrated") ||
-        messageText.includes("terrible") ||
-        messageText.includes("awful") ||
-        messageText.includes("horrible") ||
-        messageText.includes("worst") ||
-        messageText.includes("hate") ||
-        messageText.includes("disappointed") ||
-        messageText.includes("furious") ||
-        messageText.includes("unacceptable") ||
-        messageText.includes("ridiculous") ||
-        messageText.includes("disgusted")
+        lowerText.includes("angry") ||
+        lowerText.includes("frustrated") ||
+        lowerText.includes("terrible") ||
+        lowerText.includes("awful") ||
+        lowerText.includes("horrible") ||
+        lowerText.includes("worst") ||
+        lowerText.includes("hate") ||
+        lowerText.includes("disappointed") ||
+        lowerText.includes("furious") ||
+        lowerText.includes("unacceptable") ||
+        lowerText.includes("ridiculous") ||
+        lowerText.includes("disgusted")
       ) {
         detectedSentiment = "negative";
       }
       // Check for positive sentiment indicators
       else if (
-        messageText.includes("thank") ||
-        messageText.includes("thanks") ||
-        messageText.includes("great") ||
-        messageText.includes("excellent") ||
-        messageText.includes("amazing") ||
-        messageText.includes("wonderful") ||
-        messageText.includes("love") ||
-        messageText.includes("appreciate") ||
-        messageText.includes("perfect") ||
-        messageText.includes("awesome")
+        lowerText.includes("thank") ||
+        lowerText.includes("thanks") ||
+        lowerText.includes("great") ||
+        lowerText.includes("excellent") ||
+        lowerText.includes("amazing") ||
+        lowerText.includes("wonderful") ||
+        lowerText.includes("love") ||
+        lowerText.includes("appreciate") ||
+        lowerText.includes("perfect") ||
+        lowerText.includes("awesome")
       ) {
         detectedSentiment = "positive";
       }

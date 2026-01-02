@@ -8,11 +8,22 @@ import {
   Loader,
 } from "lucide-react";
 import { api } from "../services/api";
+import AlertModal from "../components/AlertModal";
+import InputModal from "../components/InputModal";
 
 const Tenants: React.FC = () => {
   const [tenants, setTenants] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [showAddTenantModal, setShowAddTenantModal] = useState(false);
+  const [newTenantName, setNewTenantName] = useState("");
+  const [creatingTenant, setCreatingTenant] = useState(false);
+  const [alertModal, setAlertModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    type: "success" | "error" | "info";
+  }>({ isOpen: false, title: "", message: "", type: "info" });
 
   useEffect(() => {
     loadTenants();
@@ -30,14 +41,33 @@ const Tenants: React.FC = () => {
   };
 
   const handleAddTenant = async () => {
-    const name = prompt("Enter tenant name:");
-    if (name) {
-      try {
-        await api.tenants.create({ name, plan: "STARTER", status: "ACTIVE" });
-        loadTenants();
-      } catch (error) {
-        alert("Failed to create tenant");
-      }
+    setNewTenantName("");
+    setShowAddTenantModal(true);
+  };
+
+  const handleConfirmAddTenant = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    setCreatingTenant(true);
+    try {
+      await api.tenants.create({
+        name: trimmed,
+        plan: "STARTER",
+        status: "ACTIVE",
+      });
+      setShowAddTenantModal(false);
+      await loadTenants();
+    } catch (error) {
+      console.error("Failed to create tenant", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Create failed",
+        message: "Failed to create tenant. Please try again.",
+        type: "error",
+      });
+    } finally {
+      setCreatingTenant(false);
     }
   };
 
@@ -162,6 +192,34 @@ const Tenants: React.FC = () => {
             </tbody>
           </table>
         </div>
+
+        <InputModal
+          isOpen={showAddTenantModal}
+          title="Add tenant"
+          message="Enter a tenant name to create a new organization."
+          placeholder="Tenant name"
+          initialValue={newTenantName}
+          confirmLabel={creatingTenant ? "Creating..." : "Create"}
+          cancelLabel="Cancel"
+          confirmDisabled={creatingTenant ? true : undefined}
+          onConfirm={(value) => {
+            setNewTenantName(value);
+            handleConfirmAddTenant(value);
+          }}
+          onCancel={() => {
+            if (creatingTenant) return;
+            setShowAddTenantModal(false);
+            setNewTenantName("");
+          }}
+        />
+
+        <AlertModal
+          isOpen={alertModal.isOpen}
+          title={alertModal.title}
+          message={alertModal.message}
+          type={alertModal.type}
+          onClose={() => setAlertModal((prev) => ({ ...prev, isOpen: false }))}
+        />
       </div>
     </div>
   );

@@ -24,11 +24,359 @@ import {
   MessageSquare,
   Edit,
   PackageOpen,
+  Target,
+  Tag,
 } from "lucide-react";
 import { User as UserType, Plan } from "../types";
 import { api } from "../services/api";
 import TestChatWidget from "../components/TestChatWidget";
 import PhoneVoiceSettings from "../components/PhoneVoiceSettings";
+import AlertModal from "../components/AlertModal";
+import ConfirmationModal from "../components/ConfirmationModal";
+
+// Intent Management Component
+const IntentManagement: React.FC = () => {
+  const [intents, setIntents] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [editingIntent, setEditingIntent] = useState<any | null>(null);
+  const [editingKeywordsText, setEditingKeywordsText] = useState("");
+  const [alertModal, setAlertModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    type: "success" | "error" | "info";
+  }>({ isOpen: false, title: "", message: "", type: "info" });
+  const [intentIdToDelete, setIntentIdToDelete] = useState<string | null>(null);
+  const [showDeleteIntentModal, setShowDeleteIntentModal] = useState(false);
+
+  useEffect(() => {
+    loadIntents();
+  }, []);
+
+  const keywordsToText = (keywords: any): string => {
+    if (!Array.isArray(keywords)) return "";
+    return keywords.join(", ");
+  };
+
+  const parseKeywords = (raw: string): string[] => {
+    const parts = raw
+      .split(/[\n,;]+/g)
+      .map((k) => k.trim())
+      .filter(Boolean);
+
+    // De-dupe while preserving order
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const p of parts) {
+      const key = p.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(p);
+    }
+    return unique;
+  };
+
+  const normalizeIntentKeywords = (intent: any): any => {
+    const keywords = Array.isArray(intent?.keywords) ? intent.keywords : [];
+    return { ...intent, keywords };
+  };
+
+  const startEditingIntent = (intent: any) => {
+    setEditingIntent(intent);
+    setEditingKeywordsText(keywordsToText(intent?.keywords));
+  };
+
+  const loadIntents = async () => {
+    try {
+      const response = await api.get("/ai-config/intents");
+      setIntents(response.intents || []);
+    } catch (error) {
+      console.error("Failed to load intents:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveIntents = async () => {
+    setSaving(true);
+    try {
+      const intentsToSave = intents
+        .map(normalizeIntentKeywords)
+        .map((intent) => {
+          if (editingIntent?.id && intent.id === editingIntent.id) {
+            return {
+              ...intent,
+              keywords: parseKeywords(editingKeywordsText),
+            };
+          }
+          return intent;
+        });
+
+      await api.put("/ai-config/intents", { intents: intentsToSave });
+      setIntents(intentsToSave);
+      if (editingIntent) {
+        setEditingIntent(null);
+        setEditingKeywordsText("");
+      }
+      setAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Intents saved successfully.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to save intents:", error);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to save intents. Please try again.";
+      setAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message,
+        type: "error",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addIntent = () => {
+    const newIntent = {
+      id: `custom_${Date.now()}`,
+      name: "New Intent",
+      description: "Describe what this intent detects",
+      keywords: [],
+      enabled: true,
+    };
+    setIntents([...intents, newIntent]);
+    startEditingIntent(newIntent);
+  };
+
+  const updateIntent = (id: string, updates: Partial<any>) => {
+    setIntents(
+      intents.map((intent) =>
+        intent.id === id ? { ...intent, ...updates } : intent
+      )
+    );
+  };
+
+  const deleteIntent = (id: string) => {
+    setIntentIdToDelete(id);
+    setShowDeleteIntentModal(true);
+  };
+
+  const handleConfirmDeleteIntent = () => {
+    if (!intentIdToDelete) return;
+
+    setIntents(intents.filter((intent) => intent.id !== intentIdToDelete));
+    setShowDeleteIntentModal(false);
+    setIntentIdToDelete(null);
+  };
+
+  const handleCancelDeleteIntent = () => {
+    setShowDeleteIntentModal(false);
+    setIntentIdToDelete(null);
+  };
+
+  const toggleIntent = (id: string) => {
+    setIntents(
+      intents.map((intent) =>
+        intent.id === id ? { ...intent, enabled: !intent.enabled } : intent
+      )
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+        <div className="text-center py-8 text-slate-500">
+          Loading intents...
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+            <Target size={18} className="text-indigo-500" /> Intent Detection
+          </h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Configure which customer intents the AI should detect and respond to
+          </p>
+        </div>
+        <button
+          onClick={addIntent}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 font-medium"
+        >
+          <Plus size={16} /> Add Intent
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        {intents.map((intent) => (
+          <div
+            key={intent.id}
+            className={`border rounded-lg p-4 transition-all ${
+              intent.enabled
+                ? "border-slate-200 bg-white"
+                : "border-slate-100 bg-slate-50 opacity-60"
+            }`}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3 flex-1">
+                <button
+                  onClick={() => toggleIntent(intent.id)}
+                  className={`mt-1 w-10 h-5 rounded-full transition-colors relative ${
+                    intent.enabled ? "bg-green-500" : "bg-slate-300"
+                  }`}
+                >
+                  <div
+                    className={`w-4 h-4 bg-white rounded-full absolute top-0.5 transition-transform ${
+                      intent.enabled ? "translate-x-5" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+
+                {editingIntent?.id === intent.id ? (
+                  <div className="flex-1 space-y-3">
+                    <input
+                      type="text"
+                      value={intent.name}
+                      onChange={(e) =>
+                        updateIntent(intent.id, { name: e.target.value })
+                      }
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-medium"
+                      placeholder="Intent name"
+                    />
+                    <textarea
+                      value={intent.description}
+                      onChange={(e) =>
+                        updateIntent(intent.id, { description: e.target.value })
+                      }
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs"
+                      placeholder="Description"
+                      rows={2}
+                    />
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Keywords (comma-separated)
+                      </label>
+                      <input
+                        type="text"
+                        value={editingKeywordsText}
+                        onChange={(e) => setEditingKeywordsText(e.target.value)}
+                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs"
+                        placeholder="e.g. hello, hi, hey, greetings"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        updateIntent(intent.id, {
+                          keywords: parseKeywords(editingKeywordsText),
+                        });
+                        setEditingIntent(null);
+                        setEditingKeywordsText("");
+                      }}
+                      className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                    >
+                      Done Editing
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-medium text-slate-800">
+                        {intent.name}
+                      </h4>
+                      {!intent.enabled && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 bg-slate-200 text-slate-600 rounded">
+                          DISABLED
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-600 mt-1">
+                      {intent.description}
+                    </p>
+                    {intent.keywords && intent.keywords.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {intent.keywords
+                          .slice(0, 5)
+                          .map((keyword: string, i: number) => (
+                            <span
+                              key={i}
+                              className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full font-medium"
+                            >
+                              {keyword}
+                            </span>
+                          ))}
+                        {intent.keywords.length > 5 && (
+                          <span className="text-[10px] px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full">
+                            +{intent.keywords.length - 5} more
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => startEditingIntent(intent)}
+                  className="text-slate-400 hover:text-indigo-600"
+                  title="Edit"
+                >
+                  <Edit size={16} />
+                </button>
+                <button
+                  onClick={() => deleteIntent(intent.id)}
+                  className="text-slate-400 hover:text-red-600"
+                  title="Delete"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end mt-4 pt-4 border-t border-slate-100">
+        <button
+          onClick={saveIntents}
+          disabled={saving}
+          className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm disabled:opacity-50"
+        >
+          <Save size={16} /> {saving ? "Saving..." : "Save Intents"}
+        </button>
+      </div>
+
+      <ConfirmationModal
+        isOpen={showDeleteIntentModal}
+        title="Delete intent?"
+        message="This will remove the intent from this tenant's configuration."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        isDestructive
+        onConfirm={handleConfirmDeleteIntent}
+        onCancel={handleCancelDeleteIntent}
+      />
+
+      <AlertModal
+        isOpen={alertModal.isOpen}
+        title={alertModal.title}
+        message={alertModal.message}
+        type={alertModal.type}
+        onClose={() => setAlertModal((prev) => ({ ...prev, isOpen: false }))}
+      />
+    </div>
+  );
+};
 
 const TEAM_MEMBERS = [
   {
@@ -104,6 +452,14 @@ const Settings: React.FC = () => {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null);
   const [isCreatingPlan, setIsCreatingPlan] = useState(false);
+  const [planToDelete, setPlanToDelete] = useState<Plan | null>(null);
+  const [showDeletePlanModal, setShowDeletePlanModal] = useState(false);
+  const [settingsAlertModal, setSettingsAlertModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    type: "success" | "error" | "info";
+  }>({ isOpen: false, title: "", message: "", type: "info" });
   const [planFormData, setPlanFormData] = useState({
     name: "",
     documentLimit: 5,
@@ -222,14 +578,32 @@ const Settings: React.FC = () => {
   };
 
   const handleDeletePlan = async (planId: string) => {
-    if (confirm("Are you sure you want to delete this plan?")) {
-      try {
-        await api.plans.delete(planId);
-        setPlans(plans.filter((p) => p.id !== planId));
-      } catch (error) {
-        console.error("Failed to delete plan:", error);
-      }
+    const plan = plans.find((p) => p.id === planId) || null;
+    setPlanToDelete(plan);
+    setShowDeletePlanModal(true);
+  };
+
+  const handleConfirmDeletePlan = async () => {
+    if (!planToDelete) return;
+    try {
+      await api.plans.delete(planToDelete.id);
+      setPlans((prev) => prev.filter((p) => p.id !== planToDelete.id));
+      setShowDeletePlanModal(false);
+      setPlanToDelete(null);
+    } catch (error) {
+      console.error("Failed to delete plan:", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Delete failed",
+        message: "Failed to delete plan. Please try again.",
+        type: "error",
+      });
     }
+  };
+
+  const handleCancelDeletePlan = () => {
+    setShowDeletePlanModal(false);
+    setPlanToDelete(null);
   };
 
   const handleCancelPlanEdit = () => {
@@ -423,6 +797,9 @@ const Settings: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              {/* Intent Detection */}
+              <IntentManagement />
 
               <div className="flex justify-end pt-4">
                 <button
@@ -1146,6 +1523,31 @@ const Settings: React.FC = () => {
           )}
         </div>
       </div>
+
+      <ConfirmationModal
+        isOpen={showDeletePlanModal}
+        title="Delete plan?"
+        message={
+          planToDelete
+            ? `This will permanently delete the plan “${planToDelete.name}”.`
+            : "This will permanently delete the plan."
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        isDestructive
+        onConfirm={handleConfirmDeletePlan}
+        onCancel={handleCancelDeletePlan}
+      />
+
+      <AlertModal
+        isOpen={settingsAlertModal.isOpen}
+        title={settingsAlertModal.title}
+        message={settingsAlertModal.message}
+        type={settingsAlertModal.type}
+        onClose={() =>
+          setSettingsAlertModal((prev) => ({ ...prev, isOpen: false }))
+        }
+      />
     </div>
   );
 };

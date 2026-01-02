@@ -131,7 +131,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Document not found" });
     }
 
-    await prisma.document.delete({ where: { id } });
+    await prisma.document.deleteMany({ where: { id, tenantId } });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete document" });

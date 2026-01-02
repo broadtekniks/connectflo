@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { GoogleAuthService } from "../services/integrations/google/auth";
 import prisma from "../lib/prisma";
-import { authenticateToken } from "../middleware/auth";
+import { authenticateToken, AuthRequest } from "../middleware/auth";
 
 const router = Router();
 const googleAuthService = new GoogleAuthService();
@@ -11,7 +11,12 @@ const googleAuthService = new GoogleAuthService();
  */
 router.get("/", authenticateToken, async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.headers["x-tenant-id"] as string) || "default";
+    const authReq = req as AuthRequest;
+    const tenantId = authReq.user?.tenantId;
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
 
     const integrations = await prisma.integration.findMany({
       where: { tenantId },
@@ -45,7 +50,12 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const { integrationType } = req.body; // 'calendar', 'gmail', 'drive', 'sheets'
-      const tenantId = (req.headers["x-tenant-id"] as string) || "default";
+      const authReq = req as AuthRequest;
+      const tenantId = authReq.user?.tenantId;
+
+      if (!tenantId) {
+        return res.status(400).json({ error: "Tenant ID not found in token" });
+      }
 
       if (!integrationType) {
         res.status(400).json({ error: "integrationType is required" });
@@ -86,14 +96,14 @@ router.get("/google/callback", async (req: Request, res: Response) => {
     res.redirect(
       `${
         process.env.FRONTEND_URL || "http://localhost:3000"
-      }/integrations?connected=google&success=true`
+      }/integrations?connected=google&success=true&category=CONNECTED`
     );
   } catch (error) {
     console.error("Error handling Google callback:", error);
     res.redirect(
       `${
         process.env.FRONTEND_URL || "http://localhost:3000"
-      }/integrations?connected=google&success=false`
+      }/integrations?connected=google&success=false&category=CONNECTED`
     );
   }
 });
@@ -107,7 +117,12 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const { integrationType } = req.body;
-      const tenantId = (req.headers["x-tenant-id"] as string) || "default";
+      const authReq = req as AuthRequest;
+      const tenantId = authReq.user?.tenantId;
+
+      if (!tenantId) {
+        return res.status(400).json({ error: "Tenant ID not found in token" });
+      }
 
       if (!integrationType) {
         res.status(400).json({ error: "integrationType is required" });
@@ -133,7 +148,12 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const { integrationType } = req.params;
-      const tenantId = (req.headers["x-tenant-id"] as string) || "default";
+      const authReq = req as AuthRequest;
+      const tenantId = authReq.user?.tenantId;
+
+      if (!tenantId) {
+        return res.status(400).json({ error: "Tenant ID not found in token" });
+      }
 
       const integration = await prisma.integration.findUnique({
         where: {

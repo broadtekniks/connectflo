@@ -39,17 +39,16 @@ router.post("/", async (req: Request, res: Response) => {
       prisma.message.create({
         data: {
           conversationId,
+          tenantId,
           content,
           sender: sender as MessageSender,
           isPrivateNote: isPrivateNote || false,
           attachments: attachments || [],
         },
       }),
-      prisma.conversation.update({
-        where: { id: conversationId },
-        data: {
-          lastActivity: new Date(),
-        },
+      prisma.conversation.updateMany({
+        where: { id: conversationId, tenantId },
+        data: { lastActivity: new Date() },
       }),
     ]);
 
@@ -66,8 +65,8 @@ router.post("/", async (req: Request, res: Response) => {
     aiService
       .analyzeSentiment(content)
       .then(async (sentiment) => {
-        await prisma.conversation.update({
-          where: { id: conversationId },
+        await prisma.conversation.updateMany({
+          where: { id: conversationId, tenantId },
           data: { sentiment: sentiment as Sentiment },
         });
       })
@@ -76,8 +75,8 @@ router.post("/", async (req: Request, res: Response) => {
     // 2. Generate AI Reply
     (async () => {
       try {
-        const conversation = await prisma.conversation.findUnique({
-          where: { id: conversationId },
+        const conversation = await prisma.conversation.findFirst({
+          where: { id: conversationId, tenantId },
           include: {
             messages: { orderBy: { createdAt: "asc" } },
             customer: true,
@@ -157,6 +156,7 @@ Business Description: ${
           const aiMessage = await prisma.message.create({
             data: {
               conversationId,
+              tenantId: conversation.tenantId,
               content: reply,
               sender: "AI",
               isPrivateNote: false,

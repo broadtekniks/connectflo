@@ -260,6 +260,7 @@ const COMPONENT_LIBRARY = [
         iconUrl: "https://cdn.simpleicons.org/slack",
         type: "integration",
         subLabel: "Notify channel",
+        provider: "slack",
       },
       {
         label: "Teams Notify",
@@ -340,6 +341,9 @@ const ConditionBuilder: React.FC<ConditionBuilderProps> = ({
     Record<string, FieldSchema[]>
   >({});
   const [loading, setLoading] = useState(true);
+  const [availableIntents, setAvailableIntents] = useState<
+    Array<{ id: string; name?: string; enabled?: boolean }>
+  >([]);
 
   // Load available fields from API
   useEffect(() => {
@@ -358,6 +362,25 @@ const ConditionBuilder: React.FC<ConditionBuilderProps> = ({
       }
     };
     loadFields();
+  }, []);
+
+  useEffect(() => {
+    const loadIntents = async () => {
+      try {
+        const response = await fetch(`${API_URL}/ai-config/intents`, {
+          headers: authHeader(),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const intents = Array.isArray(data?.intents) ? data.intents : [];
+        setAvailableIntents(intents);
+      } catch (error) {
+        // Non-blocking: conditions still work with manual input.
+        console.error("Failed to load intents:", error);
+      }
+    };
+
+    loadIntents();
   }, []);
 
   // Initialize condition config if not exists
@@ -490,13 +513,21 @@ const ConditionBuilder: React.FC<ConditionBuilderProps> = ({
     const selectedField = availableFields.find(
       (f) => f.path === simple.leftOperand?.value
     );
-    const operators = selectedField?.allowedOperators || [
-      "equals",
-      "not_equals",
-      "greater_than",
-      "less_than",
-      "contains",
-    ];
+    const operators =
+      selectedField?.path === "conversation.intent"
+        ? (selectedField?.allowedOperators || []).filter(
+            (op) => op !== "in" && op !== "not_in"
+          )
+        : selectedField?.allowedOperators || [
+            "equals",
+            "not_equals",
+            "greater_than",
+            "less_than",
+            "contains",
+          ];
+
+    const intentOptions = availableIntents.filter((i) => i?.enabled !== false);
+    const showIntentPicker = selectedField?.path === "conversation.intent";
 
     return (
       <div
@@ -563,19 +594,44 @@ const ConditionBuilder: React.FC<ConditionBuilderProps> = ({
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
                 Value
               </label>
-              <input
-                type="text"
-                value={simple.rightOperand?.value || ""}
-                onChange={(e) =>
-                  updateSimpleCondition(
-                    "simple.rightOperand.value",
-                    e.target.value,
-                    index
-                  )
-                }
-                placeholder="Enter value or {{variable}}"
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
+              {showIntentPicker && intentOptions.length > 0 ? (
+                <select
+                  value={simple.rightOperand?.value || ""}
+                  onChange={(e) =>
+                    updateSimpleCondition(
+                      "simple.rightOperand.value",
+                      e.target.value,
+                      index
+                    )
+                  }
+                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Select intent...</option>
+                  {intentOptions.map((intent) => (
+                    <option key={intent.id} value={intent.id}>
+                      {intent.name || intent.id}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={simple.rightOperand?.value || ""}
+                  onChange={(e) =>
+                    updateSimpleCondition(
+                      "simple.rightOperand.value",
+                      e.target.value,
+                      index
+                    )
+                  }
+                  placeholder={
+                    showIntentPicker
+                      ? "Enter intent id (e.g. cancel_subscription)"
+                      : "Enter value or {{variable}}"
+                  }
+                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              )}
               {selectedField?.examples && (
                 <p className="text-[10px] text-slate-400 mt-1">
                   Examples: {selectedField.examples.join(", ")}
@@ -910,9 +966,15 @@ const Workflows: React.FC = () => {
       const response = await api.get("/integrations");
       console.log("[Workflows] Fetched integrations:", response);
       console.log("[Workflows] Integrations array:", response.integrations);
-      // The response.integrations array already contains only connected integrations
-      setConnectedIntegrations(response.integrations);
-      console.log("[Workflows] Connected integrations state set to:", response.integrations);
+      // Only keep connected integrations
+      const connectedOnly = Array.isArray(response.integrations)
+        ? response.integrations.filter((i: any) => i?.connected === true)
+        : [];
+      setConnectedIntegrations(connectedOnly);
+      console.log(
+        "[Workflows] Connected integrations state set to:",
+        connectedOnly
+      );
     } catch (error) {
       console.error("Failed to fetch integrations:", error);
     }
@@ -941,15 +1003,25 @@ const Workflows: React.FC = () => {
     (c) => c.category !== CONFIG_CATEGORY_NAME
   ).map((category) => {
     if (category.category === "Available Integrations") {
-      console.log("[Workflows] Filtering integrations. connectedIntegrations:", connectedIntegrations);
-      
+      console.log(
+        "[Workflows] Filtering integrations. connectedIntegrations:",
+        connectedIntegrations
+      );
+
       return {
         ...category,
         items: category.items.filter((item: any) => {
           // If item has a provider property, check if it's connected
           if (item.provider) {
-            const isConnected = connectedIntegrations.some((i) => i.provider === item.provider);
-            console.log(`[Workflows] ${item.label} (${item.provider}) is connected:`, isConnected);
+            const isConnected = connectedIntegrations.some(
+              (i) =>
+                String(i.provider || "").toLowerCase() ===
+                String(item.provider || "").toLowerCase()
+            );
+            console.log(
+              `[Workflows] ${item.label} (${item.provider}) is connected:`,
+              isConnected
+            );
             return isConnected;
           }
           // For items without provider (future integrations), hide for now
@@ -1230,7 +1302,12 @@ const Workflows: React.FC = () => {
         await loadWorkflowResources();
       } else {
         const error = await response.json();
-        alert(error.error);
+        setAlertModal({
+          isOpen: true,
+          title: "Unable to assign document",
+          message: error?.error || "Failed to assign document.",
+          type: "error",
+        });
       }
     } catch (error) {
       console.error("Failed to assign document:", error);
@@ -1269,7 +1346,12 @@ const Workflows: React.FC = () => {
         await loadWorkflowResources();
       } else {
         const error = await response.json();
-        alert(error.error);
+        setAlertModal({
+          isOpen: true,
+          title: "Unable to assign phone number",
+          message: error?.error || "Failed to assign phone number.",
+          type: "error",
+        });
       }
     } catch (error) {
       console.error("Failed to assign phone number:", error);
@@ -1645,7 +1727,12 @@ const Workflows: React.FC = () => {
       }
     } catch (error) {
       console.error("Failed to delete workflow:", error);
-      alert("Failed to delete workflow. Please try again.");
+      setAlertModal({
+        isOpen: true,
+        title: "Delete failed",
+        message: "Failed to delete workflow. Please try again.",
+        type: "error",
+      });
     }
   };
 

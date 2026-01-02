@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { MOCK_INTEGRATIONS } from "../constants";
-import { Check, Plus, Trash2, Search, Box, Loader2 } from "lucide-react";
+import { Check, Plus, Unplug, Search, Box, Loader2 } from "lucide-react";
 import { Integration } from "../types";
 import { api } from "../services/api";
 import AlertModal from "../components/AlertModal";
+import ConfirmationModal from "../components/ConfirmationModal";
 
 const CATEGORIES: { id: string; label: string }[] = [
+  { id: "CONNECTED", label: "Connected" },
   { id: "ALL", label: "All Apps" },
   { id: "ECOMMERCE", label: "E-Commerce" },
   { id: "CRM", label: "CRM & ERP" },
@@ -44,6 +46,10 @@ const Integrations: React.FC = () => {
   >(new Set());
   const [loading, setLoading] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [disconnectTarget, setDisconnectTarget] = useState<Integration | null>(
+    null
+  );
+  const [showDisconnectModal, setShowDisconnectModal] = useState(false);
   const [alertModal, setAlertModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -66,9 +72,17 @@ const Integrations: React.FC = () => {
   useEffect(() => {
     fetchConnectedIntegrations();
 
+    // Allow deep link selection (e.g. category=CONNECTED)
+    const initialParams = new URLSearchParams(window.location.search);
+    if (initialParams.get("category") === "CONNECTED") {
+      setSelectedCategory("CONNECTED");
+    }
+
     // Check for OAuth callback success
     const params = new URLSearchParams(window.location.search);
     if (params.get("connected") === "google") {
+      // After OAuth, default to showing connected apps
+      setSelectedCategory("CONNECTED");
       if (params.get("success") === "true") {
         setAlertModal({
           isOpen: true,
@@ -162,11 +176,19 @@ const Integrations: React.FC = () => {
   };
 
   const handleDisconnect = async (integration: Integration) => {
-    const googleType = getGoogleType(integration.id);
+    setDisconnectTarget(integration);
+    setShowDisconnectModal(true);
+  };
 
-    if (!googleType) return;
+  const handleConfirmDisconnect = async () => {
+    if (!disconnectTarget) return;
 
-    if (!confirm(`Disconnect ${integration.name}?`)) return;
+    const googleType = getGoogleType(disconnectTarget.id);
+    if (!googleType) {
+      setShowDisconnectModal(false);
+      setDisconnectTarget(null);
+      return;
+    }
 
     setLoading(true);
     try {
@@ -176,14 +198,14 @@ const Integrations: React.FC = () => {
 
       setConnectedIntegrations((prev) => {
         const next = new Set(prev);
-        next.delete(integration.id);
+        next.delete(disconnectTarget.id);
         return next;
       });
 
       setAlertModal({
         isOpen: true,
         title: "Success",
-        message: `${integration.name} disconnected successfully!`,
+        message: `${disconnectTarget.name} disconnected successfully!`,
         type: "success",
       });
     } catch (error) {
@@ -196,17 +218,39 @@ const Integrations: React.FC = () => {
       });
     } finally {
       setLoading(false);
+      setShowDisconnectModal(false);
+      setDisconnectTarget(null);
     }
+  };
+
+  const handleCancelDisconnect = () => {
+    setShowDisconnectModal(false);
+    setDisconnectTarget(null);
   };
 
   const filteredIntegrations = MOCK_INTEGRATIONS.filter((int) => {
     const matchesCategory =
-      selectedCategory === "ALL" || int.category === selectedCategory;
+      selectedCategory === "ALL" ||
+      (selectedCategory === "CONNECTED"
+        ? connectedIntegrations.size === 0 || connectedIntegrations.has(int.id)
+        : int.category === selectedCategory);
     const matchesSearch =
       int.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       int.description.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesCategory && matchesSearch;
   });
+
+  const sortedIntegrations = (() => {
+    const connected: Integration[] = [];
+    const disconnected: Integration[] = [];
+
+    for (const int of filteredIntegrations) {
+      if (connectedIntegrations.has(int.id)) connected.push(int);
+      else disconnected.push(int);
+    }
+
+    return [...connected, ...disconnected];
+  })();
 
   return (
     <div className="flex-1 bg-slate-50 p-8 overflow-y-auto h-full">
@@ -257,7 +301,7 @@ const Integrations: React.FC = () => {
           {/* Integrations Grid */}
           <div className="flex-1">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredIntegrations.map((int) => {
+              {sortedIntegrations.map((int) => {
                 const isConnected = connectedIntegrations.has(int.id);
                 const isConnecting = connectingId === int.id;
                 const googleType = getGoogleType(int.id);
@@ -321,7 +365,7 @@ const Integrations: React.FC = () => {
                           {loading ? (
                             <Loader2 size={14} className="animate-spin" />
                           ) : (
-                            <Trash2 size={14} />
+                            <Unplug size={14} />
                           )}
                         </button>
                       </div>
@@ -347,6 +391,21 @@ const Integrations: React.FC = () => {
         onClose={() =>
           setAlertModal({ isOpen: false, title: "", message: "", type: "info" })
         }
+      />
+
+      <ConfirmationModal
+        isOpen={showDisconnectModal}
+        title="Disconnect integration?"
+        message={
+          disconnectTarget
+            ? `Disconnect ${disconnectTarget.name} from this tenant?`
+            : "Disconnect this integration from this tenant?"
+        }
+        confirmLabel="Disconnect"
+        cancelLabel="Cancel"
+        isDestructive
+        onConfirm={handleConfirmDisconnect}
+        onCancel={handleCancelDisconnect}
       />
     </div>
   );

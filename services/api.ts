@@ -33,6 +33,26 @@ const authHeader = () => {
   };
 };
 
+const handleAuthFailureIfNeeded = (status: number, message: string) => {
+  const normalized = (message || "").toLowerCase();
+  const shouldRelog =
+    status === 401 ||
+    status === 403 ||
+    normalized.includes("please log in again") ||
+    normalized.includes("tenant not found");
+
+  if (!shouldRelog) return;
+
+  localStorage.removeItem("token");
+  localStorage.removeItem("user");
+
+  // This app uses URL-based deep links + internal view mapping.
+  // A hard navigation ensures the app re-initializes into the Login view.
+  if (!window.location.pathname.toLowerCase().startsWith("/login")) {
+    window.location.assign("/login");
+  }
+};
+
 export const api = {
   conversations: {
     list: async (): Promise<Conversation[]> => {
@@ -632,7 +652,18 @@ export const api = {
     const response = await fetch(`${API_URL}${endpoint}`, {
       headers: authHeader(),
     });
-    if (!response.ok) throw new Error(`GET ${endpoint} failed`);
+    if (!response.ok) {
+      let message = `GET ${endpoint} failed`;
+      try {
+        const err = await response.json();
+        if (err?.error) message = String(err.error);
+      } catch {
+        // ignore
+      }
+
+      handleAuthFailureIfNeeded(response.status, message);
+      throw new Error(message);
+    }
     return response.json();
   },
 
@@ -642,7 +673,39 @@ export const api = {
       headers: authHeader(),
       body: data ? JSON.stringify(data) : undefined,
     });
-    if (!response.ok) throw new Error(`POST ${endpoint} failed`);
+    if (!response.ok) {
+      let message = `POST ${endpoint} failed`;
+      try {
+        const err = await response.json();
+        if (err?.error) message = String(err.error);
+      } catch {
+        // ignore
+      }
+
+      handleAuthFailureIfNeeded(response.status, message);
+      throw new Error(message);
+    }
+    return response.json();
+  },
+
+  put: async (endpoint: string, data?: any) => {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      method: "PUT",
+      headers: authHeader(),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    if (!response.ok) {
+      let message = `PUT ${endpoint} failed`;
+      try {
+        const err = await response.json();
+        if (err?.error) message = String(err.error);
+      } catch {
+        // ignore
+      }
+
+      handleAuthFailureIfNeeded(response.status, message);
+      throw new Error(message);
+    }
     return response.json();
   },
 };

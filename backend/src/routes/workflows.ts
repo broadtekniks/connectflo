@@ -76,8 +76,8 @@ router.put("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Workflow not found" });
     }
 
-    const workflow = await prisma.workflow.update({
-      where: { id },
+    const result = await prisma.workflow.updateMany({
+      where: { id, tenantId },
       data: {
         nodes,
         edges,
@@ -87,6 +87,18 @@ router.put("/:id", async (req: Request, res: Response) => {
         triggerType,
       },
     });
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: "Workflow not found" });
+    }
+
+    const workflow = await prisma.workflow.findFirst({
+      where: { id, tenantId },
+    });
+    if (!workflow) {
+      return res.status(404).json({ error: "Workflow not found" });
+    }
+
     res.json(workflow);
   } catch (error) {
     console.error("Failed to update workflow:", error);
@@ -114,9 +126,13 @@ router.delete("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Workflow not found" });
     }
 
-    await prisma.workflow.delete({
-      where: { id },
+    const result = await prisma.workflow.deleteMany({
+      where: { id, tenantId },
     });
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: "Workflow not found" });
+    }
 
     res.json({ success: true, message: "Workflow deleted" });
   } catch (error) {

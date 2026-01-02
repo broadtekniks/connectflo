@@ -32,16 +32,19 @@ model Conversation {
   priority     String             @default("MEDIUM")
   sentiment    Sentiment          @default(NEUTRAL)
   tags         String[]
-  tenantId     String             @default("default")
+  tenantId     String
   lastActivity DateTime           @default(now())
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   customerId   String
   assigneeId   String?
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   assignee     User?              @relation("AssignedAgent", fields: [assigneeId], references: [id])
   customer     User               @relation("Customer", fields: [customerId], references: [id])
   messages     Message[]
   usageRecords UsageRecord[]
+
+  @@index([tenantId])
 }
 
 model Message {
@@ -50,9 +53,14 @@ model Message {
   sender         MessageSender
   isPrivateNote  Boolean       @default(false)
   attachments    String[]
+  tenantId        String
   createdAt      DateTime      @default(now())
   conversationId String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([conversationId])
 }
 
 model Document {
@@ -62,11 +70,14 @@ model Document {
   size      Int
   url       String
   status    String             @default("PENDING")
-  tenantId  String             @default("default")
+  tenantId  String
   createdAt DateTime           @default(now())
   updatedAt DateTime           @updatedAt
+  tenant    Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   chunks    DocumentChunk[]
   workflows WorkflowDocument[]
+
+  @@index([tenantId])
 }
 
 model DocumentChunk {
@@ -74,7 +85,12 @@ model DocumentChunk {
   content       String
   embeddingJson Json?
   documentId    String
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([documentId])
 }
 
 model Integration {
@@ -88,9 +104,10 @@ model Integration {
   category     String?
   config       Json? // Provider-specific configuration
   credentials  Json? // Encrypted OAuth tokens: { accessToken, refreshToken, expiresAt, scope }
-  tenantId     String                @default("default")
+  tenantId     String
   createdAt    DateTime              @default(now())
   updatedAt    DateTime              @updatedAt
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   workflows    WorkflowIntegration[]
 
   @@unique([tenantId, provider, type], name: "tenantId_provider_type")
@@ -106,17 +123,20 @@ model Workflow {
   lastRun            DateTime?
   nodes              Json
   edges              Json
-  tenantId           String                @default("default")
+  tenantId           String
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
   aiConfigId         String?
   phoneVoiceId       String?
   phoneVoiceLanguage String?
   toneOfVoice        String?
+  tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   aiConfig           AiConfig?             @relation(fields: [aiConfigId], references: [id])
   documents          WorkflowDocument[]
   integrations       WorkflowIntegration[]
   phoneNumbers       WorkflowPhoneNumber[]
+
+  @@index([tenantId])
 }
 
 model PhoneNumber {
@@ -133,15 +153,18 @@ model PhoneNumber {
   pricingTierId String?
   monthlyCost   Float                 @default(0)
   status        String
-  tenantId      String                @default("default")
+  tenantId      String
   assignedToId  String?
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
   provider      PhoneProvider         @default(TELNYX)
+  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   assignedTo    User?                 @relation("AssignedUser", fields: [assignedToId], references: [id])
   pricingTier   PricingTier?          @relation(fields: [pricingTierId], references: [id])
   usageRecords  UsageRecord[]
   workflows     WorkflowPhoneNumber[]
+
+  @@index([tenantId])
 }
 
 model Tenant {
@@ -156,6 +179,17 @@ model Tenant {
   phoneVoiceLanguage String?
   aiConfig           AiConfig?
   users              User[]
+  conversations       Conversation[]
+  documents           Document[]
+  documentChunks      DocumentChunk[]
+  messages            Message[]
+  integrations        Integration[]
+  workflows           Workflow[]
+  workflowDocuments   WorkflowDocument[]
+  workflowIntegrations WorkflowIntegration[]
+  workflowPhoneNumbers WorkflowPhoneNumber[]
+  phoneNumbers        PhoneNumber[]
+  usageRecords        UsageRecord[]
 }
 
 model Plan {
@@ -198,6 +232,7 @@ model AiConfig {
   speakingRate        Float      @default(1.0)
   handoffThreshold    Float      @default(0.7)
   autoEscalate        Boolean    @default(true)
+  intents             Json?      // Array of intent objects: [{ id, name, description, keywords, actions }]
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
   tenant              Tenant     @relation(fields: [tenantId], references: [id])
@@ -224,6 +259,7 @@ model UsageRecord {
   conversationId  String?
   metadata        Json?
   createdAt       DateTime      @default(now())
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversation    Conversation? @relation(fields: [conversationId], references: [id])
   phoneNumber     PhoneNumber?  @relation(fields: [phoneNumberId], references: [id])
 
@@ -237,11 +273,14 @@ model WorkflowPhoneNumber {
   id            String      @id @default(uuid())
   workflowId    String
   phoneNumberId String
+  tenantId      String
   createdAt     DateTime    @default(now())
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
   workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
 
   @@unique([workflowId, phoneNumberId])
+  @@index([tenantId])
   @@index([workflowId])
   @@index([phoneNumberId])
 }
@@ -250,11 +289,14 @@ model WorkflowDocument {
   id         String   @id @default(uuid())
   workflowId String
   documentId String
+  tenantId   String
   createdAt  DateTime @default(now())
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
 
   @@unique([workflowId, documentId])
+  @@index([tenantId])
   @@index([workflowId])
   @@index([documentId])
 }
@@ -263,11 +305,14 @@ model WorkflowIntegration {
   id            String      @id @default(uuid())
   workflowId    String
   integrationId String
+  tenantId      String
   createdAt     DateTime    @default(now())
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   workflow      Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
 
   @@unique([workflowId, integrationId])
+  @@index([tenantId])
   @@index([workflowId])
   @@index([integrationId])
 }

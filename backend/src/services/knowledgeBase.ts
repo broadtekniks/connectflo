@@ -16,6 +16,13 @@ export class KnowledgeBaseService {
 
   async processDocument(documentId: string, fileKey: string, mimeType: string) {
     try {
+      const document = await prisma.document.findUnique({
+        where: { id: documentId },
+        select: { tenantId: true },
+      });
+
+      const tenantId = document?.tenantId;
+
       // 1. Update status
       await prisma.document.update({
         where: { id: documentId },
@@ -95,6 +102,7 @@ export class KnowledgeBaseService {
         await (prisma as any).documentChunk.create({
           data: {
             documentId,
+            tenantId,
             content: chunk,
             embeddingJson: embedding,
           },
@@ -141,9 +149,7 @@ export class KnowledgeBaseService {
 
       // Build the filter for chunks
       const filter: any = {
-        document: {
-          tenantId: tenantId,
-        },
+        OR: [{ tenantId }, { document: { tenantId } }],
       };
 
       // If documentIds provided, only search within those documents

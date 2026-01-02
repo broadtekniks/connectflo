@@ -13,8 +13,8 @@ router.get(
     const workflowId = req.params.id;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         include: {
           aiConfig: true,
           phoneNumbers: {
@@ -29,7 +29,7 @@ router.get(
         },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
@@ -60,19 +60,22 @@ router.put(
       typeof req.body?.toneOfVoice === "string" ? req.body.toneOfVoice : "";
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      const updated = await prisma.workflow.update({
-        where: { id: workflowId },
-        data: {
-          toneOfVoice: toneOfVoice.trim() ? toneOfVoice.trim() : null,
-        },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        data: { toneOfVoice: toneOfVoice.trim() ? toneOfVoice.trim() : null },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         select: { id: true, toneOfVoice: true },
       });
 
@@ -93,17 +96,22 @@ router.delete(
     const workflowId = req.params.id;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      const updated = await prisma.workflow.update({
-        where: { id: workflowId },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         data: { toneOfVoice: null },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         select: { id: true, toneOfVoice: true },
       });
 
@@ -130,22 +138,27 @@ router.put(
         : "";
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      const updated = await prisma.workflow.update({
-        where: { id: workflowId },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         data: {
           phoneVoiceId: phoneVoiceId.trim() ? phoneVoiceId.trim() : null,
           phoneVoiceLanguage: phoneVoiceLanguage.trim()
             ? phoneVoiceLanguage.trim()
             : null,
         },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         select: { id: true, phoneVoiceId: true, phoneVoiceLanguage: true },
       });
 
@@ -166,17 +179,22 @@ router.delete(
     const workflowId = req.params.id;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      const updated = await prisma.workflow.update({
-        where: { id: workflowId },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         data: { phoneVoiceId: null, phoneVoiceLanguage: null },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         select: { id: true, phoneVoiceId: true, phoneVoiceLanguage: true },
       });
 
@@ -198,14 +216,14 @@ router.post(
 
     try {
       // 1. Verify workflow ownership
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         include: {
           phoneNumbers: true,
         },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
@@ -265,6 +283,7 @@ router.post(
         data: {
           workflowId,
           phoneNumberId,
+          tenantId: workflow.tenantId,
         },
         include: {
           phoneNumber: true,
@@ -289,22 +308,18 @@ router.delete(
 
     try {
       // Verify workflow ownership
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
       // Delete assignment
-      await prisma.workflowPhoneNumber.delete({
-        where: {
-          workflowId_phoneNumberId: {
-            workflowId,
-            phoneNumberId,
-          },
-        },
+      await prisma.workflowPhoneNumber.deleteMany({
+        where: { workflowId, phoneNumberId, tenantId: authReq.user?.tenantId },
       });
 
       res.json({ success: true });
@@ -324,14 +339,14 @@ router.post(
     const { id: workflowId, documentId } = req.params;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         include: {
           documents: true,
         },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
@@ -390,6 +405,7 @@ router.post(
         data: {
           workflowId,
           documentId,
+          tenantId: workflow.tenantId,
         },
         include: {
           document: true,
@@ -413,21 +429,17 @@ router.delete(
     const { id: workflowId, documentId } = req.params;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      await prisma.workflowDocument.delete({
-        where: {
-          workflowId_documentId: {
-            workflowId,
-            documentId,
-          },
-        },
+      await prisma.workflowDocument.deleteMany({
+        where: { workflowId, documentId, tenantId: authReq.user?.tenantId },
       });
 
       res.json({ success: true });
@@ -447,14 +459,14 @@ router.post(
     const { id: workflowId, integrationId } = req.params;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         include: {
           integrations: true,
         },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
@@ -513,6 +525,7 @@ router.post(
         data: {
           workflowId,
           integrationId,
+          tenantId: workflow.tenantId,
         },
         include: {
           integration: true,
@@ -536,20 +549,20 @@ router.delete(
     const { id: workflowId, integrationId } = req.params;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      await prisma.workflowIntegration.delete({
+      await prisma.workflowIntegration.deleteMany({
         where: {
-          workflowId_integrationId: {
-            workflowId,
-            integrationId,
-          },
+          workflowId,
+          integrationId,
+          tenantId: authReq.user?.tenantId,
         },
       });
 
@@ -570,11 +583,12 @@ router.put(
     const { id: workflowId, aiConfigId } = req.params;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
@@ -591,9 +605,13 @@ router.put(
       }
 
       // Update workflow
-      const updated = await prisma.workflow.update({
-        where: { id: workflowId },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         data: { aiConfigId },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         include: { aiConfig: true },
       });
 
@@ -614,18 +632,24 @@ router.delete(
     const workflowId = req.params.id;
 
     try {
-      const workflow = await prisma.workflow.findUnique({
-        where: { id: workflowId },
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
       });
 
-      if (!workflow || workflow.tenantId !== authReq.user?.tenantId) {
+      if (!workflow) {
         return res.status(403).json({ error: "Unauthorized" });
       }
 
-      const updated = await (prisma.workflow as any).update({
-        where: { id: workflowId },
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
         data: { aiConfigId: null },
       });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+      });
+
       res.json(updated);
     } catch (error) {
       console.error("Error removing AI config:", error);

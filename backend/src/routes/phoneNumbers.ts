@@ -370,6 +370,98 @@ router.post("/sync", async (req: Request, res: Response) => {
   }
 });
 
+// Sync numbers from Twilio to database
+router.post("/sync-twilio", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  try {
+    const tenantId = authReq.user?.tenantId;
+    const role = authReq.user?.role;
+
+    // Only super admin or tenant admin can sync
+    if (role !== "SUPER_ADMIN" && role !== "TENANT_ADMIN") {
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Tenant ID not found in token" });
+    }
+
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+      return res
+        .status(400)
+        .json({ error: "Twilio credentials not configured" });
+    }
+
+    // Fetch numbers from Twilio
+    const twilioNumbers = await twilioService.listOwnedNumbers();
+
+    const syncedNumbers = [];
+    const skippedNumbers = [];
+
+    for (const twilioNum of twilioNumbers) {
+      // Check if number already exists in DB
+      const existing = await prisma.phoneNumber.findUnique({
+        where: { number: twilioNum.phoneNumber },
+      });
+
+      if (existing) {
+        skippedNumbers.push(twilioNum.phoneNumber);
+        continue;
+      }
+
+      // Get tenant to determine plan
+      const tenant = await prisma.tenant.findUnique({
+        where: { id: tenantId },
+      });
+
+      const wholesaleCost = 1.0; // Twilio default monthly cost
+      const setupCost = 1.0; // Twilio default setup cost
+
+      // Calculate retail price
+      const pricing = await pricingService.calculateRetailPrice(
+        wholesaleCost,
+        tenant?.plan || "STARTER"
+      );
+
+      // Create in database
+      const newNumber = await prisma.phoneNumber.create({
+        data: {
+          number: twilioNum.phoneNumber,
+          friendlyName: twilioNum.friendlyName,
+          country: twilioNum.phoneNumber?.startsWith("+1") ? "US" : "Unknown",
+          region: "Unknown",
+          type: "local",
+          capabilities: {
+            voice: twilioNum.capabilities.voice,
+            sms: twilioNum.capabilities.sms,
+            mms: twilioNum.capabilities.mms,
+          },
+          wholesaleCost,
+          retailPrice: pricing.retailPrice,
+          pricingTierId: pricing.pricingTierId,
+          setupCost,
+          monthlyCost: pricing.retailPrice,
+          status: "active",
+          tenantId,
+          provider: "TWILIO",
+        },
+      });
+
+      syncedNumbers.push(newNumber);
+    }
+
+    res.json({
+      message: "Twilio sync completed",
+      synced: syncedNumbers.length,
+      skipped: skippedNumbers.length,
+      numbers: syncedNumbers,
+    });
+  } catch (error) {
+    console.error("Twilio sync error:", error);
+    res.status(500).json({ error: "Failed to sync numbers from Twilio" });
+  }
+});
+
 // Update regions for existing numbers from Telnyx
 router.post("/update-regions", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;
@@ -377,7 +469,9 @@ router.post("/update-regions", async (req: Request, res: Response) => {
     const tenantId = authReq.user?.tenantId;
     const role = authReq.user?.role;
 
-    if (!tenantId && role !== "SUPER_ADMIN") {
+    const isSuperAdmin = role === "SUPER_ADMIN";
+
+    if (!tenantId && !isSuperAdmin) {
       return res.status(400).json({ error: "Tenant ID not found" });
     }
 
@@ -450,16 +544,45 @@ router.post("/update-regions", async (req: Request, res: Response) => {
           }
         }
 
-        // Update the number
-        const updatedNum = await prisma.phoneNumber.update({
-          where: { id: localNum.id },
-          data: {
-            region,
-            country,
-          },
-        });
+        // Update the number (tenant-scoped unless super admin)
+        if (isSuperAdmin) {
+          const updatedNum = await prisma.phoneNumber.update({
+            where: { id: localNum.id },
+            data: {
+              region,
+              country,
+            },
+          });
+          updated.push(updatedNum);
+        } else {
+          const result = await prisma.phoneNumber.updateMany({
+            where: { id: localNum.id, tenantId },
+            data: {
+              region,
+              country,
+            },
+          });
 
-        updated.push(updatedNum);
+          if (result.count === 0) {
+            failed.push({
+              number: localNum.number,
+              reason: "Not found or access denied",
+            });
+            continue;
+          }
+
+          const updatedNum = await prisma.phoneNumber.findFirst({
+            where: { id: localNum.id, tenantId },
+          });
+
+          if (updatedNum) updated.push(updatedNum);
+          else {
+            failed.push({
+              number: localNum.number,
+              reason: "Update applied but could not fetch",
+            });
+          }
+        }
       } catch (err) {
         console.error(`Failed to update ${localNum.number}:`, err);
         failed.push({ number: localNum.number, reason: "Update failed" });
@@ -488,22 +611,24 @@ router.post("/:id/assign", async (req: Request, res: Response) => {
     const role = authReq.user?.role;
     const tenantId = authReq.user?.tenantId;
 
+    const isSuperAdmin = role === "SUPER_ADMIN";
+
     // Only TENANT_ADMIN and SUPER_ADMIN can assign numbers
     if (role !== "TENANT_ADMIN" && role !== "SUPER_ADMIN") {
       return res.status(403).json({ error: "Insufficient permissions" });
     }
 
+    if (!tenantId && !isSuperAdmin) {
+      return res.status(400).json({ error: "Tenant ID not found" });
+    }
+
     // Verify phone number exists and belongs to tenant (unless super admin)
-    const phoneNumber = await prisma.phoneNumber.findUnique({
-      where: { id },
-    });
+    const phoneNumber = isSuperAdmin
+      ? await prisma.phoneNumber.findUnique({ where: { id } })
+      : await prisma.phoneNumber.findFirst({ where: { id, tenantId } });
 
     if (!phoneNumber) {
       return res.status(404).json({ error: "Phone number not found" });
-    }
-
-    if (role !== "SUPER_ADMIN" && phoneNumber.tenantId !== tenantId) {
-      return res.status(403).json({ error: "Access denied" });
     }
 
     // Verify user exists and belongs to same tenant
@@ -520,19 +645,42 @@ router.post("/:id/assign", async (req: Request, res: Response) => {
     }
 
     // Update assignment
-    const updatedNumber = await prisma.phoneNumber.update({
-      where: { id },
-      data: { assignedToId: userId },
-      include: {
-        assignedTo: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
+    const include = {
+      assignedTo: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
         },
       },
-    });
+    };
+
+    let updatedNumber;
+    if (isSuperAdmin) {
+      updatedNumber = await prisma.phoneNumber.update({
+        where: { id },
+        data: { assignedToId: userId },
+        include,
+      });
+    } else {
+      const result = await prisma.phoneNumber.updateMany({
+        where: { id, tenantId },
+        data: { assignedToId: userId },
+      });
+
+      if (result.count === 0) {
+        return res.status(404).json({ error: "Phone number not found" });
+      }
+
+      updatedNumber = await prisma.phoneNumber.findFirst({
+        where: { id, tenantId },
+        include,
+      });
+
+      if (!updatedNumber) {
+        return res.status(404).json({ error: "Phone number not found" });
+      }
+    }
 
     res.json(updatedNumber);
   } catch (error) {
@@ -549,29 +697,51 @@ router.post("/:id/unassign", async (req: Request, res: Response) => {
     const role = authReq.user?.role;
     const tenantId = authReq.user?.tenantId;
 
+    const isSuperAdmin = role === "SUPER_ADMIN";
+
     // Only TENANT_ADMIN and SUPER_ADMIN can unassign numbers
     if (role !== "TENANT_ADMIN" && role !== "SUPER_ADMIN") {
       return res.status(403).json({ error: "Insufficient permissions" });
     }
 
+    if (!tenantId && !isSuperAdmin) {
+      return res.status(400).json({ error: "Tenant ID not found" });
+    }
+
     // Verify phone number exists and belongs to tenant (unless super admin)
-    const phoneNumber = await prisma.phoneNumber.findUnique({
-      where: { id },
-    });
+    const phoneNumber = isSuperAdmin
+      ? await prisma.phoneNumber.findUnique({ where: { id } })
+      : await prisma.phoneNumber.findFirst({ where: { id, tenantId } });
 
     if (!phoneNumber) {
       return res.status(404).json({ error: "Phone number not found" });
     }
 
-    if (role !== "SUPER_ADMIN" && phoneNumber.tenantId !== tenantId) {
-      return res.status(403).json({ error: "Access denied" });
-    }
-
     // Remove assignment
-    const updatedNumber = await prisma.phoneNumber.update({
-      where: { id },
-      data: { assignedToId: null },
-    });
+    let updatedNumber;
+    if (isSuperAdmin) {
+      updatedNumber = await prisma.phoneNumber.update({
+        where: { id },
+        data: { assignedToId: null },
+      });
+    } else {
+      const result = await prisma.phoneNumber.updateMany({
+        where: { id, tenantId },
+        data: { assignedToId: null },
+      });
+
+      if (result.count === 0) {
+        return res.status(404).json({ error: "Phone number not found" });
+      }
+
+      updatedNumber = await prisma.phoneNumber.findFirst({
+        where: { id, tenantId },
+      });
+
+      if (!updatedNumber) {
+        return res.status(404).json({ error: "Phone number not found" });
+      }
+    }
 
     res.json(updatedNumber);
   } catch (error) {
@@ -654,22 +824,23 @@ router.post("/:id/test-call", async (req: Request, res: Response) => {
     const role = authReq.user?.role;
     const tenantId = authReq.user?.tenantId;
 
+    const isSuperAdmin = role === "SUPER_ADMIN";
+
     if (!toNumber) {
       return res.status(400).json({ error: "Destination number is required" });
     }
 
+    if (!tenantId && !isSuperAdmin) {
+      return res.status(400).json({ error: "Tenant ID not found" });
+    }
+
     // Verify phone number exists and user has access
-    const phoneNumber = await prisma.phoneNumber.findUnique({
-      where: { id },
-    });
+    const phoneNumber = isSuperAdmin
+      ? await prisma.phoneNumber.findUnique({ where: { id } })
+      : await prisma.phoneNumber.findFirst({ where: { id, tenantId } });
 
     if (!phoneNumber) {
       return res.status(404).json({ error: "Phone number not found" });
-    }
-
-    // Check permissions
-    if (role !== "SUPER_ADMIN" && phoneNumber.tenantId !== tenantId) {
-      return res.status(403).json({ error: "Access denied" });
     }
 
     // Check if number has voice capability
@@ -705,6 +876,8 @@ router.post("/:id/test-sms", async (req: Request, res: Response) => {
     const role = authReq.user?.role;
     const tenantId = authReq.user?.tenantId;
 
+    const isSuperAdmin = role === "SUPER_ADMIN";
+
     if (!toNumber) {
       return res.status(400).json({ error: "Destination number is required" });
     }
@@ -713,18 +886,17 @@ router.post("/:id/test-sms", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Message text is required" });
     }
 
+    if (!tenantId && !isSuperAdmin) {
+      return res.status(400).json({ error: "Tenant ID not found" });
+    }
+
     // Verify phone number exists and user has access
-    const phoneNumber = await prisma.phoneNumber.findUnique({
-      where: { id },
-    });
+    const phoneNumber = isSuperAdmin
+      ? await prisma.phoneNumber.findUnique({ where: { id } })
+      : await prisma.phoneNumber.findFirst({ where: { id, tenantId } });
 
     if (!phoneNumber) {
       return res.status(404).json({ error: "Phone number not found" });
-    }
-
-    // Check permissions
-    if (role !== "SUPER_ADMIN" && phoneNumber.tenantId !== tenantId) {
-      return res.status(403).json({ error: "Access denied" });
     }
 
     // Check if number has SMS capability
@@ -735,23 +907,68 @@ router.post("/:id/test-sms", async (req: Request, res: Response) => {
         .json({ error: "This number does not support SMS" });
     }
 
-    // Send the test SMS
-    const sms = await telnyxService.sendTestSMS(
+    const provider = (phoneNumber.provider as string) || "TELNYX";
+
+    // Send the test SMS using the right provider
+    if (provider === "TWILIO") {
+      if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+        return res.status(400).json({
+          error: "Twilio credentials not configured",
+        });
+      }
+
+      const twilioMsg = await twilioService.sendSMS(
+        phoneNumber.number,
+        toNumber,
+        message
+      );
+
+      return res.json({
+        success: true,
+        message: "Test SMS sent",
+        provider,
+        messageId: twilioMsg.sid,
+        from: phoneNumber.number,
+        to: toNumber,
+      });
+    }
+
+    if (!process.env.TELNYX_MESSAGING_PROFILE_ID) {
+      return res.status(400).json({
+        error:
+          "Telnyx messaging profile not configured (TELNYX_MESSAGING_PROFILE_ID)",
+      });
+    }
+
+    const telnyxMsg = await telnyxService.sendTestSMS(
       phoneNumber.number,
       toNumber,
       message
     );
 
-    res.json({
+    return res.json({
       success: true,
       message: "Test SMS sent",
-      messageId: sms.data?.id,
+      provider,
+      messageId: telnyxMsg.data?.id,
       from: phoneNumber.number,
       to: toNumber,
     });
   } catch (error) {
-    console.error("Test SMS error:", error);
-    res.status(500).json({ error: "Failed to send test SMS" });
+    // Preserve upstream provider error response when possible
+    const err: any = error;
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    console.error("Test SMS error:", data || err);
+
+    if (typeof status === "number") {
+      return res.status(status).json({
+        error: "Failed to send test SMS",
+        details: data,
+      });
+    }
+
+    return res.status(500).json({ error: "Failed to send test SMS" });
   }
 });
 

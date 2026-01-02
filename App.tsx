@@ -29,6 +29,53 @@ const App: React.FC = () => {
   >("AGENT");
   const [user, setUser] = useState<any>(null);
 
+  const authenticatedViewFromPathname = (pathname: string): string => {
+    const path = (pathname || "/").toLowerCase();
+    if (path === "/" || path === "") return "dashboard";
+    if (path.startsWith("/dashboard")) return "dashboard";
+    if (path.startsWith("/integrations")) return "integrations";
+    if (path.startsWith("/workflows")) return "workflows";
+    if (path.startsWith("/phone-numbers")) return "phone-numbers";
+    if (path.startsWith("/knowledge")) return "knowledge";
+    if (path.startsWith("/inbox")) return "inbox";
+    if (path.startsWith("/settings")) return "settings";
+    if (path.startsWith("/tenants")) return "tenants";
+    if (path.startsWith("/test-chat")) return "test-chat";
+    return "dashboard";
+  };
+
+  const publicViewFromPathname = (pathname: string): string => {
+    const path = (pathname || "/").toLowerCase();
+    if (path.startsWith("/login")) return "login";
+    if (path.startsWith("/signup")) return "signup";
+    if (path.startsWith("/pricing")) return "pricing";
+    if (path.startsWith("/privacy")) return "privacy";
+    if (path.startsWith("/security")) return "security";
+    if (path.startsWith("/terms")) return "terms";
+    return "home";
+  };
+
+  const pushAuthenticatedUrl = (view: string) => {
+    const pathMap: Record<string, string> = {
+      dashboard: "/dashboard",
+      inbox: "/inbox",
+      tenants: "/tenants",
+      integrations: "/integrations",
+      knowledge: "/knowledge",
+      "phone-numbers": "/phone-numbers",
+      workflows: "/workflows",
+      settings: "/settings",
+      "test-chat": "/test-chat",
+    };
+
+    const nextPath = pathMap[view];
+    if (!nextPath) return;
+
+    // Preserve existing query string (used by OAuth callbacks)
+    const qs = window.location.search || "";
+    window.history.pushState({}, "", `${nextPath}${qs}`);
+  };
+
   useEffect(() => {
     const token = localStorage.getItem("token");
     const userStr = localStorage.getItem("user");
@@ -38,12 +85,35 @@ const App: React.FC = () => {
         setIsLoggedIn(true);
         setUserRole(parsedUser.role);
         setUser(parsedUser);
+
+        // Support deep links like /integrations after OAuth redirects.
+        setCurrentView(authenticatedViewFromPathname(window.location.pathname));
       } catch (e) {
         console.error("Failed to parse user from local storage", e);
         localStorage.removeItem("token");
         localStorage.removeItem("user");
       }
+    } else {
+      setPublicView(publicViewFromPathname(window.location.pathname));
     }
+  }, []);
+
+  useEffect(() => {
+    // Keep view in sync with browser navigation (back/forward).
+    const onPopState = () => {
+      const token = localStorage.getItem("token");
+      const userStr = localStorage.getItem("user");
+      const loggedIn = Boolean(token && userStr);
+
+      if (loggedIn) {
+        setCurrentView(authenticatedViewFromPathname(window.location.pathname));
+      } else {
+        setPublicView(publicViewFromPathname(window.location.pathname));
+      }
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useEffect(() => {
@@ -64,7 +134,8 @@ const App: React.FC = () => {
       setIsLoggedIn(true);
       setUserRole(parsedUser.role);
       setUser(parsedUser);
-      setCurrentView("dashboard");
+      const nextView = authenticatedViewFromPathname(window.location.pathname);
+      setCurrentView(nextView);
     }
   };
 
@@ -181,7 +252,10 @@ const App: React.FC = () => {
     <div className="flex h-screen w-screen bg-slate-100 font-sans text-slate-900 overflow-hidden animate-fade-in">
       <Sidebar
         currentView={currentView}
-        onNavigate={setCurrentView}
+        onNavigate={(view) => {
+          setCurrentView(view);
+          pushAuthenticatedUrl(view);
+        }}
         userRole={userRole}
         user={user}
         onLogout={handleLogout}
