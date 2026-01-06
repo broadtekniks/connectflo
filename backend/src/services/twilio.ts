@@ -64,21 +64,34 @@ export class TwilioService {
   /**
    * Purchase a phone number
    */
-  async purchaseNumber(phoneNumber: string, webhookUrl?: string) {
+  async purchaseNumber(phoneNumber: string, voiceWebhookUrl?: string, smsWebhookUrl?: string) {
     if (!twilioClient) throw new Error("Twilio credentials not configured");
 
     try {
-      const voiceUrl = webhookUrl || process.env.TWILIO_WEBHOOK_URL || "";
+      const voiceUrl = voiceWebhookUrl || process.env.TWILIO_WEBHOOK_URL || "";
+      const smsUrl = smsWebhookUrl || voiceUrl;
       const statusCallback = deriveStatusCallbackUrl(voiceUrl);
       const purchased = await twilioClient.incomingPhoneNumbers.create({
         phoneNumber: phoneNumber,
         voiceUrl,
         voiceMethod: "POST",
-        smsUrl: voiceUrl,
+        smsUrl,
         smsMethod: "POST",
         statusCallback,
         statusCallbackMethod: "POST",
       });
+
+      // Optionally add to messaging service for A2P 10DLC
+      if (process.env.TWILIO_MESSAGING_SERVICE_SID) {
+        try {
+          await twilioClient
+            .messaging.v1.services(process.env.TWILIO_MESSAGING_SERVICE_SID)
+            .phoneNumbers.create({ phoneNumberSid: purchased.sid });
+          console.log(`[Twilio] Added ${phoneNumber} to messaging service`);
+        } catch (err) {
+          console.error("[Twilio] Failed to add to messaging service:", err);
+        }
+      }
 
       return purchased;
     } catch (error) {

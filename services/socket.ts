@@ -69,6 +69,11 @@ class SocketService {
       this.socket.off("team_member_checkin_updated");
     }
   }
+
+  setWebPhoneReady(ready: boolean) {
+    if (!this.socket) return;
+    this.socket.emit(ready ? "webphone:set_ready" : "webphone:set_not_ready");
+  }
 }
 
 export const socketService = new SocketService();

@@ -31,6 +31,7 @@ export interface User {
   email: string;
   role: "SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER";
   tenantId?: string;
+  timeZone?: string;
 }
 
 export interface Message {
@@ -114,6 +115,11 @@ export interface PhoneNumber {
     name: string;
     email: string;
   };
+
+  afterHoursMode?: "VOICEMAIL" | "AI_WORKFLOW";
+  afterHoursWorkflowId?: string | null;
+  afterHoursMessage?: string | null;
+  afterHoursNotifyUserId?: string | null;
 }
 
 // Plan Types

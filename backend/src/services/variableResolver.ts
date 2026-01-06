@@ -44,6 +44,7 @@ export interface WorkflowContext {
   };
   resources: {
     aiConfig?: any;
+    assignedAgent?: any;
     documents: any[];
     phoneNumbers: any[];
     integrations: any[];

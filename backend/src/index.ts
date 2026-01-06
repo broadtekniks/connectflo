@@ -15,6 +15,7 @@ import webhookRoutes from "./routes/webhooks";
 import twilioWebhookRoutes, {
   initializeTwilioWebSocket,
 } from "./routes/twilioWebhooks";
+import smsWebhookRoutes from "./routes/smsWebhooks";
 import workflowRoutes from "./routes/workflows";
 import workflowResourceRoutes from "./routes/workflowResources";
 import knowledgeBaseRoutes from "./routes/knowledgeBase";
@@ -27,11 +28,24 @@ import usageRoutes from "./routes/usage";
 import customerRoutes from "./routes/customers";
 import teamMemberRoutes from "./routes/teamMembers";
 import agentRoutes from "./routes/agents";
+import meRoutes from "./routes/me";
+import voicemailRoutes from "./routes/voicemails";
+import meetingRoutes from "./routes/meetings";
+import leadsRoutes from "./routes/leads";
+import callLogsRoutes from "./routes/callLogs";
+import callGroupsRoutes from "./routes/callGroups";
+import appointmentLogsRoutes from "./routes/appointmentLogs";
+import feedbackLogsRoutes from "./routes/feedbackLogs";
+import twilioTokenRoutes from "./routes/twilioTokens";
 import { voiceRouter, initializeVoiceWebSocket } from "./routes/voice";
 import voiceConfigRoutes from "./routes/voiceConfig";
 import conditionSchemaRoutes from "./routes/conditionSchema";
 import integrationRoutes from "./routes/integrations";
 import { authenticateToken } from "./middleware/auth";
+import {
+  clearWebPhonePresence,
+  setWebPhoneReady,
+} from "./services/webPhonePresence";
 
 const app = express();
 const port = process.env.PORT || 3002;
@@ -117,6 +131,7 @@ app.use("/api/ai", authenticateToken, aiRoutes);
 app.use("/api/phone-numbers", authenticateToken, phoneNumberRoutes);
 app.use("/api/workflows", authenticateToken, workflowRoutes);
 app.use("/api/workflow-resources", authenticateToken, workflowResourceRoutes);
+app.use("/api/voicemails", authenticateToken, voicemailRoutes);
 app.use("/api/knowledge-base", authenticateToken, knowledgeBaseRoutes);
 app.use("/api/tenants", authenticateToken, tenantRoutes);
 app.use("/api/ai-config", authenticateToken, aiConfigRoutes);
@@ -125,6 +140,14 @@ app.use("/api/metrics", authenticateToken, metricsRoutes);
 app.use("/api/customers", authenticateToken, customerRoutes);
 app.use("/api/team-members", authenticateToken, teamMemberRoutes);
 app.use("/api/agents", authenticateToken, agentRoutes);
+app.use("/api/me", authenticateToken, meRoutes);
+app.use("/api/meetings", authenticateToken, meetingRoutes);
+app.use("/api/leads", authenticateToken, leadsRoutes);
+app.use("/api/call-logs", authenticateToken, callLogsRoutes);
+app.use("/api/call-groups", authenticateToken, callGroupsRoutes);
+app.use("/api/twilio", authenticateToken, twilioTokenRoutes);
+app.use("/api/appointment-logs", authenticateToken, appointmentLogsRoutes);
+app.use("/api/feedback-logs", authenticateToken, feedbackLogsRoutes);
 app.use("/api/plans", authenticateToken, planRoutes);
 app.use("/api/usage", authenticateToken, usageRoutes);
 app.use("/api/voice", authenticateToken, voiceRouter);
@@ -133,9 +156,23 @@ app.use("/api/integrations", integrationRoutes); // Must be BEFORE the catch-all
 app.use("/api", authenticateToken, conditionSchemaRoutes);
 app.use("/webhooks", webhookRoutes);
 app.use("/webhooks/twilio", twilioWebhookRoutes);
+app.use("/webhooks", smsWebhookRoutes);
 
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
+
+  const tenantId = (socket.data.user as any)?.tenantId as string | undefined;
+  const userId = (socket.data.user as any)?.userId as string | undefined;
+
+  socket.on("webphone:set_ready", () => {
+    if (!tenantId || !userId) return;
+    setWebPhoneReady({ tenantId, userId, ready: true });
+  });
+
+  socket.on("webphone:set_not_ready", () => {
+    if (!tenantId || !userId) return;
+    setWebPhoneReady({ tenantId, userId, ready: false });
+  });
 
   socket.on("join_conversation", (conversationId) => {
     socket.join(conversationId);
@@ -144,6 +181,9 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
+    if (tenantId && userId) {
+      clearWebPhonePresence({ tenantId, userId });
+    }
   });
 });
 

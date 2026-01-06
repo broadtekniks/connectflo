@@ -5,6 +5,26 @@ const authService = new GoogleAuthService();
 
 export class GoogleCalendarService {
   /**
+   * Returns the conference solution types allowed for the user's primary calendar.
+   * See Calendar API: Calendars.get -> conferenceProperties.allowedConferenceSolutionTypes
+   */
+  async getAllowedConferenceSolutionTypes(tenantId: string): Promise<string[]> {
+    const auth = await authService.getAuthenticatedClient(tenantId, "calendar");
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const response = await calendar.calendars.get({
+      calendarId: "primary",
+    });
+
+    const allowed = (response.data as any)?.conferenceProperties
+      ?.allowedConferenceSolutionTypes;
+
+    return Array.isArray(allowed)
+      ? allowed.map((t) => String(t)).filter(Boolean)
+      : [];
+  }
+
+  /**
    * Create a calendar event
    */
   async createEvent(
@@ -17,10 +37,18 @@ export class GoogleCalendarService {
       attendees?: string[]; // Email addresses
       location?: string;
       timeZone?: string;
+      sendUpdates?: "all" | "externalOnly" | "none";
+      addMeet?: boolean;
+      conferenceSolutionType?: string;
     }
   ) {
     const auth = await authService.getAuthenticatedClient(tenantId, "calendar");
     const calendar = google.calendar({ version: "v3", auth });
+
+    const addMeet = eventData.addMeet ?? true;
+    const conferenceSolutionType = String(
+      eventData.conferenceSolutionType || ""
+    ).trim();
 
     const event = {
       summary: eventData.summary,
@@ -35,26 +63,42 @@ export class GoogleCalendarService {
         timeZone: eventData.timeZone || "America/New_York",
       },
       attendees: eventData.attendees?.map((email) => ({ email })),
-      conferenceData: {
-        createRequest: {
-          requestId: `${Date.now()}`,
-          conferenceSolutionKey: { type: "hangoutsMeet" },
-        },
-      },
+      ...(addMeet
+        ? {
+            conferenceData: {
+              createRequest: {
+                requestId: `${Date.now()}`,
+                conferenceSolutionKey: {
+                  type: conferenceSolutionType || "hangoutsMeet",
+                },
+              },
+            },
+          }
+        : {}),
     };
 
-    const response = await calendar.events.insert({
+    const request: any = {
       calendarId: "primary",
       requestBody: event,
-      conferenceDataVersion: 1,
-      sendUpdates: "all", // Send email invitations
-    });
+      sendUpdates: eventData.sendUpdates ?? "all", // Send email invitations
+    };
+
+    if (addMeet) {
+      request.conferenceDataVersion = 1;
+    }
+
+    const response = await calendar.events.insert(request);
+
+    const entryPoints = (response.data as any)?.conferenceData?.entryPoints;
+    const firstUri = Array.isArray(entryPoints)
+      ? String(entryPoints?.find((e: any) => e?.uri)?.uri || "")
+      : "";
 
     return {
       success: true,
       eventId: response.data.id,
       htmlLink: response.data.htmlLink,
-      meetLink: response.data.hangoutLink,
+      meetLink: response.data.hangoutLink || firstUri || undefined,
     };
   }
 

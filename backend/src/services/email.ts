@@ -8,6 +8,11 @@ interface EmailOptions {
   isHtml?: boolean;
   from?: string;
   replyTo?: string;
+  attachments?: Array<{
+    filename: string;
+    content: string | Buffer;
+    contentType?: string;
+  }>;
 }
 
 export class EmailService {
@@ -101,14 +106,26 @@ export class EmailService {
     const toAddresses = Array.isArray(options.to) ? options.to : [options.to];
     const from = options.from || this.defaultFrom;
 
+    const buildTextFallback = (body: string) => {
+      // Minimal HTML-to-text fallback: preserve basic line breaks then strip tags.
+      return String(body ?? "")
+        .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+        .replace(/<\s*\/\s*p\s*>/gi, "\n\n")
+        .replace(/<[^>]+>/g, "")
+        .trim();
+    };
+
     try {
       const info = await this.transporter.sendMail({
         from: from,
         to: toAddresses.join(", "),
         subject: options.subject,
-        text: options.isHtml ? undefined : options.body,
+        // Always include a text part so the body isn't lost
+        // in clients/providers that don't render HTML-only emails.
+        text: options.isHtml ? buildTextFallback(options.body) : options.body,
         html: options.isHtml ? options.body : undefined,
         replyTo: options.replyTo,
+        attachments: options.attachments,
       });
 
       console.log(

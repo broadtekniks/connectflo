@@ -65,6 +65,23 @@ const PhoneNumbers: React.FC = () => {
     "This is a test message from ConnectFlo"
   );
   const [isTesting, setIsTesting] = useState(false);
+  const [showFlowModal, setShowFlowModal] = useState(false);
+  const [selectedNumberForFlow, setSelectedNumberForFlow] =
+    useState<PhoneNumber | null>(null);
+  const [afterHoursMode, setAfterHoursMode] = useState<
+    "VOICEMAIL" | "AI_WORKFLOW"
+  >("VOICEMAIL");
+  const [afterHoursWorkflowId, setAfterHoursWorkflowId] = useState<string>("");
+  const [afterHoursMessage, setAfterHoursMessage] = useState<string>(
+    "Thanks for calling. We're currently closed. Please leave a message after the beep."
+  );
+  const [afterHoursNotifyUserId, setAfterHoursNotifyUserId] =
+    useState<string>("");
+  const [incomingCallWorkflows, setIncomingCallWorkflows] = useState<any[]>([]);
+  const [notifyUsers, setNotifyUsers] = useState<
+    Array<{ id: string; name: string | null; email: string }>
+  >([]);
+  const [flowSaving, setFlowSaving] = useState(false);
   const [modalState, setModalState] = useState<{
     isOpen: boolean;
     title: string;
@@ -95,6 +112,90 @@ const PhoneNumbers: React.FC = () => {
       loadTenants();
     }
   }, []);
+
+  useEffect(() => {
+    if (!showFlowModal) return;
+
+    Promise.allSettled([api.workflows.list(), api.teamMembers.list()]).then(
+      (results) => {
+        const wfRes = results[0];
+        const tmRes = results[1];
+
+        if (wfRes.status === "fulfilled") {
+          const wfs = (wfRes.value || []).filter(
+            (w: any) => w?.triggerType === "Incoming Call" && w?.isActive
+          );
+          setIncomingCallWorkflows(wfs);
+        }
+
+        if (tmRes.status === "fulfilled") {
+          const users = (tmRes.value || [])
+            .filter(
+              (u: any) => u?.role === "AGENT" || u?.role === "TENANT_ADMIN"
+            )
+            .map((u: any) => ({ id: u.id, name: u.name, email: u.email }));
+          setNotifyUsers(users);
+        }
+      }
+    );
+  }, [showFlowModal]);
+
+  const openFlowModal = (num: PhoneNumber) => {
+    setSelectedNumberForFlow(num);
+    setAfterHoursMode((num.afterHoursMode as any) || "VOICEMAIL");
+    setAfterHoursWorkflowId(String(num.afterHoursWorkflowId || ""));
+    setAfterHoursMessage(
+      String(
+        num.afterHoursMessage ||
+          "Thanks for calling. We're currently closed. Please leave a message after the beep."
+      )
+    );
+    setAfterHoursNotifyUserId(String(num.afterHoursNotifyUserId || ""));
+    setShowFlowModal(true);
+  };
+
+  const handleSaveFlow = async () => {
+    if (!selectedNumberForFlow) return;
+
+    setFlowSaving(true);
+    try {
+      const updated = await api.phoneNumbers.updateAfterHours(
+        selectedNumberForFlow.id,
+        {
+          afterHoursMode,
+          afterHoursWorkflowId:
+            afterHoursMode === "AI_WORKFLOW"
+              ? afterHoursWorkflowId || null
+              : null,
+          afterHoursMessage: afterHoursMessage.trim() || null,
+          afterHoursNotifyUserId: afterHoursNotifyUserId || null,
+        }
+      );
+
+      setOwnedNumbers((prev) =>
+        prev.map((n) => (n.id === updated.id ? updated : n))
+      );
+
+      setShowFlowModal(false);
+      setSelectedNumberForFlow(null);
+      setModalState({
+        isOpen: true,
+        title: "Saved",
+        message: "After-hours settings updated.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to save after-hours settings", error);
+      setModalState({
+        isOpen: true,
+        title: "Save Failed",
+        message: "Failed to update after-hours settings.",
+        type: "error",
+      });
+    } finally {
+      setFlowSaving(false);
+    }
+  };
 
   const loadOwnedNumbers = async () => {
     try {
@@ -615,7 +716,10 @@ const PhoneNumbers: React.FC = () => {
                               Assign Tenant
                             </button>
                           )}
-                          <button className="text-slate-500 hover:text-indigo-600 px-3 py-1.5 rounded border border-slate-200 hover:border-indigo-200 text-xs font-medium transition-colors">
+                          <button
+                            onClick={() => openFlowModal(num)}
+                            className="text-slate-500 hover:text-indigo-600 px-3 py-1.5 rounded border border-slate-200 hover:border-indigo-200 text-xs font-medium transition-colors"
+                          >
                             Configure Flow
                           </button>
                         </div>
@@ -728,7 +832,10 @@ const PhoneNumbers: React.FC = () => {
                           Assign Tenant
                         </button>
                       )}
-                      <button className="flex-1 py-2 border border-slate-200 text-slate-600 rounded-lg font-bold hover:bg-slate-50 hover:text-slate-900 transition-all text-sm">
+                      <button
+                        onClick={() => openFlowModal(num)}
+                        className="flex-1 py-2 border border-slate-200 text-slate-600 rounded-lg font-bold hover:bg-slate-50 hover:text-slate-900 transition-all text-sm"
+                      >
                         Configure Flow
                       </button>
                     </div>
@@ -1127,6 +1234,124 @@ const PhoneNumbers: React.FC = () => {
                   </>
                 ) : (
                   <>{testType === "call" ? "Make Call" : "Send SMS"}</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Configure Flow Modal */}
+      {showFlowModal && selectedNumberForFlow && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full mx-4">
+            <div className="p-6 border-b border-slate-200">
+              <h3 className="text-xl font-bold text-slate-900">
+                Configure After-Hours
+              </h3>
+              <p className="text-slate-500 mt-1">
+                {formatPhoneNumber(selectedNumberForFlow.number)}
+              </p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  After-hours behavior
+                </label>
+                <select
+                  value={afterHoursMode}
+                  onChange={(e) =>
+                    setAfterHoursMode(
+                      e.target.value as "VOICEMAIL" | "AI_WORKFLOW"
+                    )
+                  }
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-white"
+                >
+                  <option value="VOICEMAIL">Voicemail</option>
+                  <option value="AI_WORKFLOW">After-hours workflow</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  After-hours workflow
+                </label>
+                <select
+                  value={afterHoursWorkflowId}
+                  onChange={(e) => setAfterHoursWorkflowId(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-white"
+                  disabled={afterHoursMode !== "AI_WORKFLOW"}
+                >
+                  <option value="">Select a workflow…</option>
+                  {incomingCallWorkflows.map((wf) => (
+                    <option key={wf.id} value={wf.id}>
+                      {wf.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  Used only when after-hours behavior is set to workflow.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  Voicemail message
+                </label>
+                <textarea
+                  value={afterHoursMessage}
+                  onChange={(e) => setAfterHoursMessage(e.target.value)}
+                  rows={3}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder="Message played before recording"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  Notify / assign to
+                </label>
+                <select
+                  value={afterHoursNotifyUserId}
+                  onChange={(e) => setAfterHoursNotifyUserId(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-white"
+                >
+                  <option value="">Unassigned</option>
+                  {notifyUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {(u.name || u.email) + (u.name ? ` (${u.email})` : "")}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  If set, new voicemail conversations are assigned to this user.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowFlowModal(false);
+                  setSelectedNumberForFlow(null);
+                }}
+                className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
+                disabled={flowSaving}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveFlow}
+                disabled={flowSaving}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {flowSaving ? (
+                  <>
+                    <Loader2 className="animate-spin" size={16} /> Saving...
+                  </>
+                ) : (
+                  <>Save</>
                 )}
               </button>
             </div>

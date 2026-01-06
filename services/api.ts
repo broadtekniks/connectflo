@@ -54,6 +54,134 @@ const handleAuthFailureIfNeeded = (status: number, message: string) => {
 };
 
 export const api = {
+  twilio: {
+    getVoiceToken: async (): Promise<{ token: string; identity: string }> => {
+      const response = await fetch(`${API_URL}/twilio/voice-token`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch Twilio voice token";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+  },
+
+  me: {
+    getProfile: async (): Promise<{
+      timeZone: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/me/profile`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch profile");
+      return response.json();
+    },
+
+    setTimeZone: async (
+      timeZone: string | null
+    ): Promise<{
+      timeZone: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/me/profile`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify({ timeZone }),
+      });
+      if (!response.ok) throw new Error("Failed to update time zone");
+      return response.json();
+    },
+
+    getSchedule: async (): Promise<{
+      agentTimeZone: string | null;
+      workingHours: null | Record<
+        string,
+        { start: string; end: string } | null
+      >;
+    }> => {
+      const response = await fetch(`${API_URL}/me/schedule`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch schedule";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    setSchedule: async (data: {
+      agentTimeZone: string | null;
+      workingHours: null | Record<
+        string,
+        { start: string; end: string } | null
+      >;
+    }): Promise<{
+      agentTimeZone: string | null;
+      workingHours: null | Record<
+        string,
+        { start: string; end: string } | null
+      >;
+    }> => {
+      const response = await fetch(`${API_URL}/me/schedule`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        let message = "Failed to update schedule";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    getCallerId: async (): Promise<{
+      phoneNumberId: string | null;
+      phoneNumber: { id: string; number: string; friendlyName: string } | null;
+    }> => {
+      const response = await fetch(`${API_URL}/me/caller-id`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch caller ID");
+      return response.json();
+    },
+
+    setCallerId: async (
+      phoneNumberId: string | null
+    ): Promise<{
+      phoneNumberId: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/me/caller-id`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify({ phoneNumberId }),
+      });
+      if (!response.ok) throw new Error("Failed to update caller ID");
+      return response.json();
+    },
+  },
+
   agents: {
     me: async (): Promise<{
       isCheckedIn: boolean;
@@ -205,6 +333,45 @@ export const api = {
       if (!response.ok) throw new Error("Failed to fetch tenant");
       return response.json();
     },
+
+    getBusinessHours: async (): Promise<{
+      timeZone: string | null;
+      businessHours: any;
+      calendarAutoAddMeet?: boolean;
+      maxMeetingDurationMinutes?: number;
+      chatAfterHoursMode: "ONLY_ON_ESCALATION" | "ALWAYS" | "NEVER";
+      chatAfterHoursMessage: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/tenants/me/business-hours`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch business hours");
+      return response.json();
+    },
+
+    setBusinessHours: async (data: {
+      timeZone: string | null;
+      businessHours: any;
+      calendarAutoAddMeet?: boolean;
+      maxMeetingDurationMinutes?: number;
+      chatAfterHoursMode: "ONLY_ON_ESCALATION" | "ALWAYS" | "NEVER";
+      chatAfterHoursMessage: string | null;
+    }): Promise<{
+      timeZone: string | null;
+      businessHours: any;
+      calendarAutoAddMeet?: boolean;
+      maxMeetingDurationMinutes?: number;
+      chatAfterHoursMode: "ONLY_ON_ESCALATION" | "ALWAYS" | "NEVER";
+      chatAfterHoursMessage: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/tenants/me/business-hours`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to update business hours");
+      return response.json();
+    },
     create: async (data: {
       name: string;
       plan?: string;
@@ -227,6 +394,74 @@ export const api = {
         body: JSON.stringify({ tenantId }),
       });
       if (!response.ok) throw new Error("Failed to create test customer");
+      return response.json();
+    },
+
+    getBusinessTimeZone: async (): Promise<{ timeZone: string | null }> => {
+      const response = await fetch(`${API_URL}/tenants/me/business-timezone`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch tenant timezone";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    getWebPhoneSettings: async (): Promise<{
+      webPhoneEnabled: boolean;
+      webPhoneOutboundCallerNumber: string | null;
+      webPhoneOutboundCallerName: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/tenants/me/web-phone-settings`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch web phone settings";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    setWebPhoneSettings: async (data: {
+      webPhoneEnabled?: boolean;
+      webPhoneOutboundCallerNumber?: string | null;
+      webPhoneOutboundCallerName?: string | null;
+    }): Promise<{
+      webPhoneEnabled: boolean;
+      webPhoneOutboundCallerNumber: string | null;
+      webPhoneOutboundCallerName: string | null;
+    }> => {
+      const response = await fetch(`${API_URL}/tenants/me/web-phone-settings`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        let message = "Failed to update web phone settings";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
       return response.json();
     },
   },
@@ -273,6 +508,12 @@ export const api = {
         createdAt: string;
         isCheckedIn: boolean;
         checkedInAt: string | null;
+        agentTimeZone?: string | null;
+        workingHours?: null | Record<
+          string,
+          { start: string; end: string } | null
+        >;
+        forwardingPhoneNumber?: string | null;
       }>
     > => {
       const response = await fetch(`${API_URL}/team-members`, {
@@ -280,6 +521,70 @@ export const api = {
       });
       if (!response.ok) {
         let message = "Failed to fetch team members";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    updateForwardingNumber: async (
+      id: string,
+      data: {
+        forwardingPhoneNumber: string | null;
+      }
+    ): Promise<{
+      id: string;
+      forwardingPhoneNumber: string | null;
+    }> => {
+      const response = await fetch(
+        `${API_URL}/team-members/${id}/forwarding-number`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+          body: JSON.stringify(data),
+        }
+      );
+      if (!response.ok) {
+        let message = "Failed to update forwarding number";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+
+    updateSchedule: async (
+      id: string,
+      data: {
+        agentTimeZone: string | null;
+        workingHours: null | Record<
+          string,
+          { start: string; end: string } | null
+        >;
+      }
+    ): Promise<{
+      id: string;
+      agentTimeZone: string | null;
+      workingHours: any;
+    }> => {
+      const response = await fetch(`${API_URL}/team-members/${id}/schedule`, {
+        method: "PUT",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        let message = "Failed to update schedule";
         try {
           const err = await response.json();
           if (err?.error) message = String(err.error);
@@ -468,6 +773,28 @@ export const api = {
         }
       );
       if (!response.ok) throw new Error("Failed to assign phone number");
+      return response.json();
+    },
+
+    updateAfterHours: async (
+      numberId: string,
+      data: {
+        afterHoursMode: "VOICEMAIL" | "AI_WORKFLOW";
+        afterHoursWorkflowId: string | null;
+        afterHoursMessage: string | null;
+        afterHoursNotifyUserId: string | null;
+      }
+    ): Promise<PhoneNumber> => {
+      const response = await fetch(
+        `${API_URL}/phone-numbers/${numberId}/after-hours`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+          body: JSON.stringify(data),
+        }
+      );
+      if (!response.ok)
+        throw new Error("Failed to update after-hours settings");
       return response.json();
     },
     unassign: async (numberId: string): Promise<PhoneNumber> => {
@@ -833,6 +1160,25 @@ export const api = {
     return response.json();
   },
 
+  getBlob: async (endpoint: string) => {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      headers: authHeader(),
+    });
+    if (!response.ok) {
+      let message = `GET ${endpoint} failed`;
+      try {
+        const err = await response.json();
+        if (err?.error) message = String(err.error);
+      } catch {
+        // ignore
+      }
+
+      handleAuthFailureIfNeeded(response.status, message);
+      throw new Error(message);
+    }
+    return response.blob();
+  },
+
   post: async (endpoint: string, data?: any) => {
     const response = await fetch(`${API_URL}${endpoint}`, {
       method: "POST",
@@ -873,5 +1219,235 @@ export const api = {
       throw new Error(message);
     }
     return response.json();
+  },
+
+  meetings: {
+    list: async (): Promise<{
+      meetings: Array<{
+        id: string;
+        summary: string;
+        startTime: string;
+        endTime: string;
+        htmlLink?: string;
+        attendees: string[];
+        customer?: {
+          id: string;
+          name: string;
+          email: string;
+          avatar?: string;
+        };
+      }>;
+      connected: boolean;
+      total: number;
+      message?: string;
+    }> => {
+      const response = await fetch(`${API_URL}/meetings`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        let message = "Failed to fetch meetings";
+        try {
+          const err = await response.json();
+          if (err?.error) message = String(err.error);
+        } catch {
+          // ignore
+        }
+        handleAuthFailureIfNeeded(response.status, message);
+        throw new Error(message);
+      }
+      return response.json();
+    },
+  },
+
+  appointmentLogs: {
+    list: async (params?: {
+      status?: string;
+      source?: string;
+    }): Promise<{
+      appointmentLogs: Array<{
+        id: string;
+        customerName: string;
+        customerEmail: string | null;
+        customerPhone: string | null;
+        appointmentTime: string;
+        durationMinutes: number;
+        status: string;
+        eventId: string | null;
+        source: string;
+        notes: string | null;
+        createdAt: string;
+        customer?: {
+          id: string;
+          name: string;
+          email: string;
+          phone: string;
+        };
+      }>;
+      total: number;
+    }> => {
+      const queryParams = new URLSearchParams(params as any).toString();
+      const url = `${API_URL}/appointment-logs${
+        queryParams ? `?${queryParams}` : ""
+      }`;
+      const response = await fetch(url, { headers: authHeader() });
+      if (!response.ok) throw new Error("Failed to fetch appointment logs");
+      return response.json();
+    },
+    updateStatus: async (id: string, status: string) => {
+      const response = await fetch(`${API_URL}/appointment-logs/${id}/status`, {
+        method: "PATCH",
+        headers: authHeader(),
+        body: JSON.stringify({ status }),
+      });
+      if (!response.ok) throw new Error("Failed to update appointment status");
+      return response.json();
+    },
+  },
+
+  leads: {
+    list: async (params?: {
+      status?: string;
+      source?: string;
+    }): Promise<{
+      leads: Array<{
+        id: string;
+        name: string;
+        email: string | null;
+        phone: string | null;
+        source: string;
+        status: string;
+        notes: string | null;
+        spreadsheetId: string | null;
+        createdAt: string;
+        customer?: {
+          id: string;
+          name: string;
+          email: string;
+          phone: string;
+        };
+      }>;
+      total: number;
+    }> => {
+      const queryParams = new URLSearchParams(params as any).toString();
+      const url = `${API_URL}/leads${queryParams ? `?${queryParams}` : ""}`;
+      const response = await fetch(url, { headers: authHeader() });
+      if (!response.ok) throw new Error("Failed to fetch leads");
+      return response.json();
+    },
+    updateStatus: async (id: string, status: string) => {
+      const response = await fetch(`${API_URL}/leads/${id}/status`, {
+        method: "PATCH",
+        headers: authHeader(),
+        body: JSON.stringify({ status }),
+      });
+      if (!response.ok) throw new Error("Failed to update lead status");
+      return response.json();
+    },
+  },
+
+  callLogs: {
+    list: async (params?: {
+      direction?: string;
+      status?: string;
+    }): Promise<{
+      callLogs: Array<{
+        id: string;
+        callSid: string;
+        direction: string;
+        from: string;
+        to: string;
+        status: string;
+        durationSeconds: number | null;
+        recordingUrl: string | null;
+        transcriptSummary: string | null;
+        sentiment: string | null;
+        outcome: string | null;
+        createdAt: string;
+        customer?: {
+          id: string;
+          name: string;
+          email: string;
+          phone: string;
+        };
+        phoneNumber?: {
+          id: string;
+          number: string;
+        };
+      }>;
+      total: number;
+    }> => {
+      const queryParams = new URLSearchParams(params as any).toString();
+      const url = `${API_URL}/call-logs${queryParams ? `?${queryParams}` : ""}`;
+      const response = await fetch(url, { headers: authHeader() });
+      if (!response.ok) throw new Error("Failed to fetch call logs");
+      return response.json();
+    },
+  },
+
+  feedbackLogs: {
+    list: async (params?: {
+      sentiment?: string;
+      category?: string;
+      minRating?: number;
+    }): Promise<{
+      feedbackLogs: Array<{
+        id: string;
+        rating: number | null;
+        sentiment: string | null;
+        category: string | null;
+        feedback: string;
+        source: string;
+        createdAt: string;
+        customer?: {
+          id: string;
+          name: string;
+          email: string;
+          phone: string;
+        };
+      }>;
+      total: number;
+      averageRating: number;
+    }> => {
+      const queryParams = new URLSearchParams(params as any).toString();
+      const url = `${API_URL}/feedback-logs${
+        queryParams ? `?${queryParams}` : ""
+      }`;
+      const response = await fetch(url, { headers: authHeader() });
+      if (!response.ok) throw new Error("Failed to fetch feedback logs");
+      return response.json();
+    },
+    analytics: async (): Promise<{
+      totalCount: number;
+      averageRating: number;
+      sentimentBreakdown: Array<{ sentiment: string; _count: number }>;
+      categoryBreakdown: Array<{ category: string; _count: number }>;
+    }> => {
+      const response = await fetch(`${API_URL}/feedback-logs/analytics`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch feedback analytics");
+      return response.json();
+    },
+    submit: async (data: {
+      conversationId?: string;
+      customerId?: string;
+      rating: number | null;
+      sentiment?: string | null;
+      category?: string | null;
+      feedback: string;
+      source?: string;
+      metadata?: any;
+    }): Promise<{
+      message: string;
+      feedbackId: string;
+    }> => {
+      const response = await fetch(`${API_URL}/feedback-logs`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) throw new Error("Failed to submit feedback");
+      return response.json();
+    },
   },
 };

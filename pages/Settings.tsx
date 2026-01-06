@@ -5,6 +5,8 @@ import {
   Shield,
   Globe,
   Building,
+  Clock,
+  Phone,
   Bot,
   Save,
   Upload,
@@ -31,6 +33,111 @@ import TestChatWidget from "../components/TestChatWidget";
 import PhoneVoiceSettings from "../components/PhoneVoiceSettings";
 import AlertModal from "../components/AlertModal";
 import ConfirmationModal from "../components/ConfirmationModal";
+import WorkingHoursModal, {
+  WorkingHoursConfig,
+} from "../components/WorkingHoursModal";
+
+const getDetectedTimeZone = (): string => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+
+const getTimeZoneOptions = (preferred?: string): string[] => {
+  const intlAny: any = Intl as any;
+  if (typeof intlAny.supportedValuesOf === "function") {
+    try {
+      const zones = intlAny.supportedValuesOf("timeZone");
+      if (Array.isArray(zones) && zones.length > 0) {
+        if (preferred && !zones.includes(preferred)) {
+          return [preferred, ...zones];
+        }
+        return zones;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  // Fallback list for older runtimes
+  const fallback = [
+    "UTC",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Phoenix",
+    "America/Toronto",
+    "America/Sao_Paulo",
+    "Europe/London",
+    "Europe/Berlin",
+    "Europe/Paris",
+    "Europe/Madrid",
+    "Africa/Lagos",
+    "Africa/Johannesburg",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Singapore",
+    "Asia/Tokyo",
+    "Australia/Sydney",
+  ];
+
+  if (preferred && !fallback.includes(preferred)) {
+    return [preferred, ...fallback];
+  }
+
+  return fallback;
+};
+
+const formatUtcOffset = (offsetMinutes: number): string => {
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMinutes);
+  const hh = Math.floor(abs / 60)
+    .toString()
+    .padStart(2, "0");
+  const mm = (abs % 60).toString().padStart(2, "0");
+  return `UTC${sign}${hh}:${mm}`;
+};
+
+const getTimeZoneOffsetMinutes = (timeZone: string, at: Date): number => {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  const parts = dtf.formatToParts(at);
+  const map: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== "literal") map[p.type] = p.value;
+  }
+
+  const year = parseInt(map.year, 10);
+  const month = parseInt(map.month, 10);
+  const day = parseInt(map.day, 10);
+  const hour = parseInt(map.hour, 10);
+  const minute = parseInt(map.minute, 10);
+  const second = parseInt(map.second, 10);
+
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  return Math.round((asUtc - at.getTime()) / 60000);
+};
+
+const formatTimeZoneLabel = (timeZone: string): string => {
+  try {
+    const offsetMinutes = getTimeZoneOffsetMinutes(timeZone, new Date());
+    return `${timeZone} (${formatUtcOffset(offsetMinutes)})`;
+  } catch {
+    return timeZone;
+  }
+};
 
 // Intent Management Component
 const IntentManagement: React.FC = () => {
@@ -380,6 +487,62 @@ const Settings: React.FC = () => {
   const [activeTab, setActiveTab] = useState("general");
   const [user, setUser] = useState<UserType | null>(null);
   const [tenant, setTenant] = useState<any>(null);
+  const [detectedTimeZone] = useState(() => getDetectedTimeZone());
+  const [timeZoneOptions] = useState(() =>
+    getTimeZoneOptions(detectedTimeZone)
+  );
+  const [timeZone, setTimeZone] = useState<string>(detectedTimeZone);
+  const [timeZoneSaving, setTimeZoneSaving] = useState(false);
+  const [callerIdNumbers, setCallerIdNumbers] = useState<
+    Array<{ id: string; number: string; friendlyName: string }>
+  >([]);
+  const [callerIdSelection, setCallerIdSelection] = useState<string>("");
+  const [callerIdSaving, setCallerIdSaving] = useState(false);
+
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [myAgentTimeZone, setMyAgentTimeZone] = useState<string | null>(null);
+  const [myWorkingHours, setMyWorkingHours] = useState<null | Record<
+    string,
+    { start: string; end: string } | null
+  >>(null);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [tenantScheduleTimeZone, setTenantScheduleTimeZone] = useState<
+    string | null
+  >(null);
+
+  const defaultBusinessHours = {
+    days: {
+      mon: { enabled: true, start: "09:00", end: "17:00" },
+      tue: { enabled: true, start: "09:00", end: "17:00" },
+      wed: { enabled: true, start: "09:00", end: "17:00" },
+      thu: { enabled: true, start: "09:00", end: "17:00" },
+      fri: { enabled: true, start: "09:00", end: "17:00" },
+      sat: { enabled: false, start: "09:00", end: "17:00" },
+      sun: { enabled: false, start: "09:00", end: "17:00" },
+    },
+  };
+
+  const [businessTimeZone, setBusinessTimeZone] =
+    useState<string>(detectedTimeZone);
+  const [businessHours, setBusinessHours] = useState<any>(defaultBusinessHours);
+  const [calendarAutoAddMeet, setCalendarAutoAddMeet] = useState<boolean>(true);
+  const [maxMeetingDurationMinutes, setMaxMeetingDurationMinutes] =
+    useState<number>(60);
+  const [chatAfterHoursMode, setChatAfterHoursMode] = useState<
+    "ONLY_ON_ESCALATION" | "ALWAYS" | "NEVER"
+  >("ONLY_ON_ESCALATION");
+  const [chatAfterHoursMessage, setChatAfterHoursMessage] =
+    useState<string>("");
+  const [businessHoursLoading, setBusinessHoursLoading] = useState(false);
+  const [businessHoursSaving, setBusinessHoursSaving] = useState(false);
+  const [webPhoneEnabled, setWebPhoneEnabled] = useState<boolean>(false);
+  const [webPhoneOutboundCallerNumber, setWebPhoneOutboundCallerNumber] =
+    useState<string>("");
+  const [webPhoneOutboundCallerName, setWebPhoneOutboundCallerName] =
+    useState<string>("");
+  const [webPhoneLoading, setWebPhoneLoading] = useState(false);
+  const [webPhoneSaving, setWebPhoneSaving] = useState(false);
 
   useEffect(() => {
     const userStr = localStorage.getItem("user");
@@ -387,11 +550,248 @@ const Settings: React.FC = () => {
       const userData = JSON.parse(userStr);
       setUser(userData);
 
+      // If the local user object already has a timezone, prefer it while we fetch.
+      if (userData?.timeZone) {
+        setTimeZone(String(userData.timeZone));
+      }
+
       if (userData.tenantId) {
         api.tenants.get(userData.tenantId).then(setTenant).catch(console.error);
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    api.me
+      .getProfile()
+      .then((profile) => {
+        const tz = profile?.timeZone || detectedTimeZone;
+        setTimeZone(tz);
+      })
+      .catch((error) => {
+        console.error("Failed to load profile", error);
+        setTimeZone((prev) => prev || detectedTimeZone);
+      });
+  }, [user?.id, detectedTimeZone]);
+
+  useEffect(() => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "AGENT") return;
+
+    api.tenants
+      .getBusinessTimeZone()
+      .then((tz) => setTenantScheduleTimeZone(tz.timeZone ?? null))
+      .catch(() => setTenantScheduleTimeZone(null));
+
+    setScheduleLoading(true);
+    api.me
+      .getSchedule()
+      .then((data) => {
+        setMyAgentTimeZone(data.agentTimeZone ?? null);
+        setMyWorkingHours((data as any)?.workingHours ?? null);
+      })
+      .catch((e) => {
+        console.error("Failed to load schedule", e);
+      })
+      .finally(() => setScheduleLoading(false));
+  }, [user?.tenantId, user?.role]);
+
+  const summarizeWorkingHours = (
+    workingHours?: typeof myWorkingHours
+  ): string => {
+    if (!workingHours || typeof workingHours !== "object") {
+      return "Tenant default";
+    }
+    const enabledDays = Object.values(workingHours).filter(
+      (v) => v && (v as any).start && (v as any).end
+    );
+    if (enabledDays.length === 0) return "Closed";
+    if (enabledDays.length === 7) return "Daily";
+    return `${enabledDays.length} days`;
+  };
+
+  useEffect(() => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "AGENT") return;
+
+    Promise.allSettled([api.phoneNumbers.list(), api.me.getCallerId()]).then(
+      (results) => {
+        const numbersRes = results[0];
+        const prefRes = results[1];
+
+        if (numbersRes.status === "fulfilled") {
+          setCallerIdNumbers(
+            numbersRes.value.map((n) => ({
+              id: n.id,
+              number: n.number,
+              friendlyName: n.friendlyName,
+            }))
+          );
+        }
+
+        if (prefRes.status === "fulfilled") {
+          setCallerIdSelection(prefRes.value.phoneNumberId || "");
+        }
+      }
+    );
+  }, [user?.tenantId, user?.role]);
+
+  useEffect(() => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setBusinessHoursLoading(true);
+    api.tenants
+      .getBusinessHours()
+      .then((data) => {
+        if (data?.timeZone) setBusinessTimeZone(String(data.timeZone));
+        if (data?.businessHours) setBusinessHours(data.businessHours);
+        if (typeof (data as any)?.calendarAutoAddMeet === "boolean") {
+          setCalendarAutoAddMeet(Boolean((data as any).calendarAutoAddMeet));
+        }
+        if (typeof (data as any)?.maxMeetingDurationMinutes === "number") {
+          const v = (data as any).maxMeetingDurationMinutes;
+          if (Number.isFinite(v) && v > 0) {
+            setMaxMeetingDurationMinutes(Math.floor(v));
+          }
+        }
+        if (data?.chatAfterHoursMode)
+          setChatAfterHoursMode(data.chatAfterHoursMode);
+        setChatAfterHoursMessage(String(data?.chatAfterHoursMessage || ""));
+      })
+      .catch((err) => {
+        console.error("Failed to load business hours", err);
+      })
+      .finally(() => setBusinessHoursLoading(false));
+  }, [user?.tenantId, user?.role]);
+
+  useEffect(() => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setWebPhoneLoading(true);
+    api.tenants
+      .getWebPhoneSettings()
+      .then((data) => {
+        setWebPhoneEnabled(Boolean(data?.webPhoneEnabled));
+        setWebPhoneOutboundCallerNumber(
+          String(data?.webPhoneOutboundCallerNumber || "")
+        );
+        setWebPhoneOutboundCallerName(
+          String(data?.webPhoneOutboundCallerName || "")
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to load web phone settings", err);
+        setWebPhoneEnabled(false);
+        setWebPhoneOutboundCallerNumber("");
+        setWebPhoneOutboundCallerName("");
+      })
+      .finally(() => setWebPhoneLoading(false));
+  }, [user?.tenantId, user?.role]);
+
+  const handleToggleWebPhoneEnabled = async (next: boolean) => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setWebPhoneSaving(true);
+    try {
+      const updated = await api.tenants.setWebPhoneSettings({
+        webPhoneEnabled: next,
+      });
+      setWebPhoneEnabled(Boolean(updated?.webPhoneEnabled));
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Web Phone setting updated.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to update web phone settings", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: "Failed to update Web Phone setting.",
+        type: "error",
+      });
+    } finally {
+      setWebPhoneSaving(false);
+    }
+  };
+
+  const handleSaveWebPhoneOutboundSettings = async () => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setWebPhoneSaving(true);
+    try {
+      const updated = await api.tenants.setWebPhoneSettings({
+        webPhoneOutboundCallerNumber: webPhoneOutboundCallerNumber
+          ? webPhoneOutboundCallerNumber
+          : null,
+        webPhoneOutboundCallerName: webPhoneOutboundCallerName
+          ? webPhoneOutboundCallerName
+          : null,
+      });
+      setWebPhoneOutboundCallerNumber(
+        String(updated?.webPhoneOutboundCallerNumber || "")
+      );
+      setWebPhoneOutboundCallerName(
+        String(updated?.webPhoneOutboundCallerName || "")
+      );
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Web Phone outbound settings updated.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to update web phone outbound settings", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: "Failed to update Web Phone outbound settings.",
+        type: "error",
+      });
+    } finally {
+      setWebPhoneSaving(false);
+    }
+  };
+
+  const handleSaveBusinessHours = async () => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setBusinessHoursSaving(true);
+    try {
+      await api.tenants.setBusinessHours({
+        timeZone: businessTimeZone || null,
+        businessHours,
+        calendarAutoAddMeet,
+        maxMeetingDurationMinutes,
+        chatAfterHoursMode,
+        chatAfterHoursMessage: chatAfterHoursMessage.trim() || null,
+      });
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Business hours updated successfully.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to save business hours", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: "Failed to update business hours.",
+        type: "error",
+      });
+    } finally {
+      setBusinessHoursSaving(false);
+    }
+  };
 
   // AI Config State
   const [aiName, setAiName] = useState("Flo");
@@ -591,6 +991,12 @@ const Settings: React.FC = () => {
       label: "Organization",
       icon: Building,
       roles: ["TENANT_ADMIN"],
+    },
+    {
+      id: "web-phone",
+      label: "Web Phone",
+      icon: Phone,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN"],
     },
     {
       id: "ai-agent",
@@ -964,6 +1370,232 @@ const Settings: React.FC = () => {
                 </div>
               </div>
 
+              {(user?.role === "TENANT_ADMIN" ||
+                user?.role === "SUPER_ADMIN") && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Clock size={18} className="text-indigo-500" /> Business
+                    Hours
+                  </h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                        Time Zone
+                      </label>
+                      <select
+                        value={businessTimeZone}
+                        onChange={(e) => setBusinessTimeZone(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                        disabled={businessHoursLoading}
+                      >
+                        {timeZoneOptions.map((tz) => (
+                          <option key={tz} value={tz}>
+                            {formatTimeZoneLabel(tz)}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Used to determine open/closed for calls and chats.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                        Chat After-Hours Mode
+                      </label>
+                      <select
+                        value={chatAfterHoursMode}
+                        onChange={(e) =>
+                          setChatAfterHoursMode(
+                            e.target.value as
+                              | "ONLY_ON_ESCALATION"
+                              | "ALWAYS"
+                              | "NEVER"
+                          )
+                        }
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                        disabled={businessHoursLoading}
+                      >
+                        <option value="ONLY_ON_ESCALATION">
+                          Only when escalation needed
+                        </option>
+                        <option value="ALWAYS">Always</option>
+                        <option value="NEVER">Never</option>
+                      </select>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Applies to AI auto-replies after hours.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                        Max Meeting Duration (minutes)
+                      </label>
+                      <input
+                        type="number"
+                        min={5}
+                        max={480}
+                        step={5}
+                        value={maxMeetingDurationMinutes}
+                        onChange={(e) => {
+                          const v = parseInt(String(e.target.value || "0"), 10);
+                          const clamped = Number.isFinite(v)
+                            ? Math.min(480, Math.max(5, v))
+                            : 60;
+                          setMaxMeetingDurationMinutes(clamped);
+                        }}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                        disabled={businessHoursLoading}
+                      />
+                      <p className="text-xs text-slate-400 mt-1">
+                        Used to enforce booking limits for chat/call scheduling.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <label className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={calendarAutoAddMeet}
+                        onChange={(e) =>
+                          setCalendarAutoAddMeet(e.target.checked)
+                        }
+                        disabled={businessHoursLoading}
+                      />
+                      <span>
+                        <span className="block text-sm text-slate-700 font-medium">
+                          Auto-add Google Meet link
+                        </span>
+                        <span className="block text-xs text-slate-400">
+                          When enabled, new Google Calendar events will include
+                          a Meet link.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="mt-6">
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-3">
+                      Weekly Schedule
+                    </label>
+                    <div className="space-y-2">
+                      {(
+                        [
+                          ["mon", "Mon"],
+                          ["tue", "Tue"],
+                          ["wed", "Wed"],
+                          ["thu", "Thu"],
+                          ["fri", "Fri"],
+                          ["sat", "Sat"],
+                          ["sun", "Sun"],
+                        ] as const
+                      ).map(([key, label]) => {
+                        const day =
+                          businessHours?.days?.[key] ||
+                          defaultBusinessHours.days[key];
+
+                        return (
+                          <div
+                            key={key}
+                            className="grid grid-cols-12 gap-3 items-center"
+                          >
+                            <div className="col-span-2 flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(day.enabled)}
+                                onChange={(e) => {
+                                  const next = {
+                                    ...businessHours,
+                                    days: {
+                                      ...businessHours.days,
+                                      [key]: {
+                                        ...day,
+                                        enabled: e.target.checked,
+                                      },
+                                    },
+                                  };
+                                  setBusinessHours(next);
+                                }}
+                                disabled={businessHoursLoading}
+                              />
+                              <span className="text-sm text-slate-700 font-medium">
+                                {label}
+                              </span>
+                            </div>
+
+                            <div className="col-span-5">
+                              <input
+                                type="time"
+                                value={day.start}
+                                onChange={(e) => {
+                                  const next = {
+                                    ...businessHours,
+                                    days: {
+                                      ...businessHours.days,
+                                      [key]: { ...day, start: e.target.value },
+                                    },
+                                  };
+                                  setBusinessHours(next);
+                                }}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                                disabled={businessHoursLoading || !day.enabled}
+                              />
+                            </div>
+                            <div className="col-span-5">
+                              <input
+                                type="time"
+                                value={day.end}
+                                onChange={(e) => {
+                                  const next = {
+                                    ...businessHours,
+                                    days: {
+                                      ...businessHours.days,
+                                      [key]: { ...day, end: e.target.value },
+                                    },
+                                  };
+                                  setBusinessHours(next);
+                                }}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                                disabled={businessHoursLoading || !day.enabled}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="mt-6">
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                      Chat After-Hours Message
+                    </label>
+                    <textarea
+                      value={chatAfterHoursMessage}
+                      onChange={(e) => setChatAfterHoursMessage(e.target.value)}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="Optional. If empty, a default message is used."
+                      disabled={businessHoursLoading}
+                    />
+                  </div>
+
+                  <div className="mt-6 flex justify-end">
+                    <button
+                      onClick={handleSaveBusinessHours}
+                      disabled={businessHoursSaving || businessHoursLoading}
+                      className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      <Save size={16} />
+                      {businessHoursSaving ? "Saving..." : "Save"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
                 <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
                   <Palette size={18} className="text-indigo-500" /> Widget
@@ -1297,6 +1929,7 @@ const Settings: React.FC = () => {
                   Manage your personal account details.
                 </p>
               </div>
+
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
                 <div className="flex items-center gap-6 mb-6">
                   <img
@@ -1342,8 +1975,248 @@ const Settings: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                <h3 className="font-bold text-slate-800 mb-2">Time Zone</h3>
+                <p className="text-sm text-slate-500 mb-4">
+                  Detected locally:{" "}
+                  <span className="font-medium">
+                    {formatTimeZoneLabel(detectedTimeZone)}
+                  </span>
+                </p>
+
+                <div className="flex flex-col md:flex-row gap-3 md:items-center">
+                  <select
+                    value={timeZone}
+                    onChange={(e) => setTimeZone(e.target.value)}
+                    className="w-full md:w-[28rem] px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm"
+                  >
+                    {timeZoneOptions.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {formatTimeZoneLabel(tz)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={timeZoneSaving}
+                    onClick={async () => {
+                      try {
+                        setTimeZoneSaving(true);
+                        const result = await api.me.setTimeZone(
+                          timeZone || null
+                        );
+
+                        // Keep localStorage user in sync for convenience elsewhere.
+                        const userStr = localStorage.getItem("user");
+                        if (userStr) {
+                          const current = JSON.parse(userStr);
+                          const updated = {
+                            ...current,
+                            timeZone: result.timeZone || undefined,
+                          };
+                          localStorage.setItem("user", JSON.stringify(updated));
+                          setUser(updated);
+                        }
+                      } catch (e) {
+                        console.error("Failed to update time zone", e);
+                      } finally {
+                        setTimeZoneSaving(false);
+                      }
+                    }}
+                    className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {timeZoneSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+
+              {(user?.role === "TENANT_ADMIN" || user?.role === "AGENT") && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h3 className="font-bold text-slate-800 mb-2">
+                        Working hours
+                      </h3>
+                      <p className="text-sm text-slate-500">
+                        Used for scheduling when a workflow is assigned to you.
+                      </p>
+                      <div className="mt-3 text-sm text-slate-700">
+                        <div>
+                          <span className="font-semibold">Hours:</span>{" "}
+                          {scheduleLoading
+                            ? "Loading…"
+                            : summarizeWorkingHours(myWorkingHours)}
+                        </div>
+                        <div className="mt-1">
+                          <span className="font-semibold">Time zone:</span>{" "}
+                          {myAgentTimeZone
+                            ? formatTimeZoneLabel(myAgentTimeZone)
+                            : `Tenant default — ${formatTimeZoneLabel(
+                                tenantScheduleTimeZone ||
+                                  businessTimeZone ||
+                                  detectedTimeZone
+                              )}`}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={scheduleLoading || scheduleSaving}
+                      onClick={() => setScheduleModalOpen(true)}
+                      className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 inline-flex items-center gap-2"
+                    >
+                      <Clock size={16} />
+                      {scheduleSaving ? "Saving…" : "Edit"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <WorkingHoursModal
+                isOpen={scheduleModalOpen}
+                memberName={user?.name || user?.email || ""}
+                tenantTimeZone={
+                  tenantScheduleTimeZone || businessTimeZone || detectedTimeZone
+                }
+                initialAgentTimeZone={myAgentTimeZone}
+                initialWorkingHours={myWorkingHours}
+                canEdit={true}
+                onCancel={() => setScheduleModalOpen(false)}
+                onSave={async (data) => {
+                  try {
+                    setScheduleSaving(true);
+                    const result = await api.me.setSchedule({
+                      agentTimeZone: data.agentTimeZone,
+                      workingHours:
+                        data.workingHours as WorkingHoursConfig | null,
+                    });
+                    setMyAgentTimeZone(result.agentTimeZone ?? null);
+                    setMyWorkingHours((result as any)?.workingHours ?? null);
+                    setScheduleModalOpen(false);
+                  } catch (e) {
+                    console.error("Failed to update schedule", e);
+                  } finally {
+                    setScheduleSaving(false);
+                  }
+                }}
+              />
             </div>
           )}
+
+          {/* --- WEB PHONE (TENANT ADMIN / SUPER ADMIN) --- */}
+          {activeTab === "web-phone" &&
+            (user?.role === "TENANT_ADMIN" || user?.role === "SUPER_ADMIN") && (
+              <div className="space-y-8 animate-fade-in">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900">
+                    Web Phone
+                  </h2>
+                  <p className="text-slate-500">
+                    Control whether agents can use the in-app browser dialer.
+                  </p>
+                </div>
+
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Phone size={18} className="text-indigo-500" /> Web Phone
+                    Access
+                  </h3>
+
+                  <label className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={webPhoneEnabled}
+                      onChange={(e) =>
+                        handleToggleWebPhoneEnabled(e.target.checked)
+                      }
+                      disabled={webPhoneLoading || webPhoneSaving}
+                    />
+                    <span>
+                      <span className="block text-sm text-slate-700 font-medium">
+                        Enable Web Phone for agents
+                      </span>
+                      <span className="block text-xs text-slate-400">
+                        When enabled, agents will see the dialer button and can
+                        take calls in the browser.
+                      </span>
+                    </span>
+                  </label>
+
+                  {(webPhoneLoading || webPhoneSaving) && (
+                    <div className="mt-2 text-xs text-slate-500">
+                      {webPhoneLoading ? "Loading..." : "Saving..."}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Phone size={18} className="text-indigo-500" /> Outbound
+                    Caller Settings
+                  </h3>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700">
+                        Outbound caller number
+                      </label>
+                      <p className="text-xs text-slate-400 mb-2">
+                        This number will be used as the caller ID for browser
+                        outbound calls.
+                      </p>
+                      <select
+                        value={webPhoneOutboundCallerNumber}
+                        onChange={(e) =>
+                          setWebPhoneOutboundCallerNumber(e.target.value)
+                        }
+                        disabled={webPhoneLoading || webPhoneSaving}
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white text-slate-900"
+                      >
+                        <option value="">Use tenant default</option>
+                        {callerIdNumbers.map((n) => (
+                          <option key={n.id} value={n.number}>
+                            {n.friendlyName ? `${n.friendlyName} — ` : ""}
+                            {n.number}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700">
+                        Business caller name
+                      </label>
+                      <p className="text-xs text-slate-400 mb-2">
+                        Used for display in the app. Phone carrier caller-name
+                        display (CNAM) may not reflect this value.
+                      </p>
+                      <input
+                        type="text"
+                        value={webPhoneOutboundCallerName}
+                        onChange={(e) =>
+                          setWebPhoneOutboundCallerName(e.target.value)
+                        }
+                        disabled={webPhoneLoading || webPhoneSaving}
+                        placeholder="Example: Acme Plumbing"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3">
+                      <button
+                        onClick={handleSaveWebPhoneOutboundSettings}
+                        disabled={webPhoneLoading || webPhoneSaving}
+                        className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                      >
+                        {webPhoneSaving ? "Saving…" : "Save"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
         </div>
       </div>
 

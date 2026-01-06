@@ -1,10 +1,14 @@
 import { Router, Request, Response } from "express";
 import { GoogleAuthService } from "../services/integrations/google/auth";
+import { GoogleGmailService } from "../services/integrations/google/gmail";
+import { GoogleCalendarService } from "../services/integrations/google/calendar";
 import prisma from "../lib/prisma";
 import { authenticateToken, AuthRequest } from "../middleware/auth";
 
 const router = Router();
 const googleAuthService = new GoogleAuthService();
+const googleGmailService = new GoogleGmailService();
+const googleCalendarService = new GoogleCalendarService();
 
 /**
  * Get all integrations for a tenant
@@ -179,6 +183,76 @@ router.get(
     } catch (error) {
       console.error("Error checking integration status:", error);
       res.status(500).json({ error: "Failed to check integration status" });
+    }
+  }
+);
+
+/**
+ * Get the connected Gmail account email ("send as") for this tenant
+ */
+router.get(
+  "/google/gmail/profile",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthRequest;
+      const tenantId = authReq.user?.tenantId;
+
+      if (!tenantId) {
+        return res.status(400).json({ error: "Tenant ID not found in token" });
+      }
+
+      const profile = await googleGmailService.getProfile(tenantId);
+      return res.json({ connected: true, email: profile.email });
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "");
+      const isNotConnected = /not connected/i.test(message);
+      if (isNotConnected) {
+        return res.json({ connected: false });
+      }
+      console.error("Error fetching Gmail profile:", error);
+      return res.status(500).json({ error: "Failed to fetch Gmail profile" });
+    }
+  }
+);
+
+/**
+ * Get allowed conference provider types for the connected Google Calendar.
+ * Uses the Calendar API's `conferenceProperties.allowedConferenceSolutionTypes`.
+ */
+router.get(
+  "/google/calendar/conference-solutions",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthRequest;
+      const tenantId = authReq.user?.tenantId;
+
+      if (!tenantId) {
+        return res.status(400).json({ error: "Tenant ID not found in token" });
+      }
+
+      const allowed =
+        await googleCalendarService.getAllowedConferenceSolutionTypes(tenantId);
+
+      return res.json({
+        connected: true,
+        allowedConferenceSolutionTypes: allowed,
+      });
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? "");
+      const isNotConnected = /not connected/i.test(message);
+      if (isNotConnected) {
+        return res.json({
+          connected: false,
+          allowedConferenceSolutionTypes: [],
+        });
+      }
+
+      console.error("Error fetching calendar conference solutions:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch calendar conference solutions" });
     }
   }
 );

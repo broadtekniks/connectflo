@@ -16,14 +16,29 @@ model User {
   avatar                String?
   role                  Role           @default(CUSTOMER)
   tenantId              String?
+  phoneNumber           String?        // Customer's phone number for SMS/calls
   isCheckedIn           Boolean        @default(false)
   checkedInAt           DateTime?
+  forwardingPhoneNumber String?
+  callerIdPhoneNumberId String?
+  timeZone              String?
+  agentTimeZone         String?        // Agent's timezone for scheduling
+  workingHours          Json?          // Agent's working hours
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
   assignedConversations Conversation[] @relation("AssignedAgent")
   conversations         Conversation[] @relation("Customer")
   assignedPhoneNumbers  PhoneNumber[]  @relation("AssignedUser")
+  afterHoursPhoneNumbers PhoneNumber[] @relation("AfterHoursNotifyUser")
+  callerIdPhoneNumber   PhoneNumber?   @relation("CallerIdPhoneNumber", fields: [callerIdPhoneNumberId], references: [id])
   tenant                Tenant?        @relation(fields: [tenantId], references: [id])
+  leadCaptures          LeadCapture[]  @relation("LeadCustomer")
+  callLogs              CallLog[]      @relation("CallCustomer")
+  appointmentLogs       AppointmentLog[] @relation("AppointmentCustomer")
+  feedbackLogs          FeedbackLog[]  @relation("FeedbackCustomer")
+  assignedWorkflows     Workflow[]     @relation("AssignedAgent")
+
+  callGroupMemberships  CallGroupMember[]
 }
 
 model Conversation {
@@ -126,6 +141,7 @@ model Workflow {
   nodes              Json
   edges              Json
   tenantId           String
+  assignedAgentId    String?               // Assigned agent for this workflow (null = any agent)
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
   aiConfigId         String?
@@ -134,11 +150,14 @@ model Workflow {
   toneOfVoice        String?
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   aiConfig           AiConfig?             @relation(fields: [aiConfigId], references: [id])
+  assignedAgent      User?                 @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
   documents          WorkflowDocument[]
   integrations       WorkflowIntegration[]
   phoneNumbers       WorkflowPhoneNumber[]
+  afterHoursPhoneNumbers PhoneNumber[] @relation("AfterHoursWorkflow")
 
   @@index([tenantId])
+  @@index([assignedAgentId])
 }
 
 model PhoneNumber {
@@ -157,14 +176,22 @@ model PhoneNumber {
   status        String
   tenantId      String
   assignedToId  String?
+  afterHoursMode         String?  @default("VOICEMAIL")
+  afterHoursWorkflowId   String?
+  afterHoursMessage      String?
+  afterHoursNotifyUserId String?
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
   provider      PhoneProvider         @default(TELNYX)
   tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   assignedTo    User?                 @relation("AssignedUser", fields: [assignedToId], references: [id])
+  callerIdUsers User[]                @relation("CallerIdPhoneNumber")
+  afterHoursWorkflow   Workflow? @relation("AfterHoursWorkflow", fields: [afterHoursWorkflowId], references: [id])
+  afterHoursNotifyUser User?     @relation("AfterHoursNotifyUser", fields: [afterHoursNotifyUserId], references: [id])
   pricingTier   PricingTier?          @relation(fields: [pricingTierId], references: [id])
   usageRecords  UsageRecord[]
   workflows     WorkflowPhoneNumber[]
+  callLogs      CallLog[]             @relation("CallPhoneNumber")
 
   @@index([tenantId])
 }
@@ -175,6 +202,17 @@ model Tenant {
   slug               String    @unique
   plan               String    @default("STARTER")
   status             String    @default("ACTIVE")
+  businessTimeZone      String?
+  businessHours         Json?
+  webPhoneEnabled        Boolean   @default(false)
+  webPhoneOutboundCallerNumber String?
+  webPhoneOutboundCallerName   String?
+  restrictExternalForwarding Boolean @default(false)
+  externalForwardingAllowList String[] @default([])
+  calendarAutoAddMeet   Boolean   @default(true)
+  maxMeetingDurationMinutes Int @default(60)
+  chatAfterHoursMode    String? @default("ONLY_ON_ESCALATION")
+  chatAfterHoursMessage String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   phoneVoiceId       String?
@@ -192,6 +230,59 @@ model Tenant {
   workflowPhoneNumbers WorkflowPhoneNumber[]
   phoneNumbers        PhoneNumber[]
   usageRecords        UsageRecord[]
+  leadCaptures        LeadCapture[]
+  callLogs            CallLog[]
+  appointmentLogs     AppointmentLog[]
+  feedbackLogs        FeedbackLog[]
+  smsOptOuts          SmsOptOut[]
+
+  callGroups          CallGroup[]
+}
+
+model CallGroup {
+  id                String   @id @default(uuid())
+  tenantId          String
+  name              String
+  ringStrategy      String   @default("SEQUENTIAL") // SEQUENTIAL | SIMULTANEOUS
+  ringTimeoutSeconds Int     @default(20)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  members           CallGroupMember[]
+
+  @@index([tenantId])
+  @@unique([tenantId, name])
+}
+
+model SmsOptOut {
+  id          String   @id @default(uuid())
+  tenantId    String
+  phoneNumber String
+  reason      String?
+  optedOutAt  DateTime @default(now())
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, phoneNumber])
+  @@index([tenantId])
+  @@index([phoneNumber])
+}
+
+model CallGroupMember {
+  id          String   @id @default(uuid())
+  tenantId    String
+  callGroupId String
+  userId      String
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  callGroup   CallGroup @relation(fields: [callGroupId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([callGroupId])
+  @@unique([callGroupId, userId])
 }
 
 model Plan {
@@ -368,4 +459,100 @@ enum UsageType {
 enum PhoneProvider {
   TELNYX
   TWILIO
+}
+
+model LeadCapture {
+  id              String   @id @default(uuid())
+  tenantId        String
+  customerId      String?
+  name            String?
+  email           String?
+  phone           String?
+  source          String?
+  status          String   @default("NEW")
+  notes           String?
+  metadata        Json?
+  conversationId  String?
+  spreadsheetId   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        User?    @relation("LeadCustomer", fields: [customerId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([customerId])
+  @@index([status])
+}
+
+model CallLog {
+  id                String       @id @default(uuid())
+  tenantId          String
+  customerId        String?
+  phoneNumberId     String?
+  callSid           String?      @unique
+  direction         String
+  from              String
+  to                String
+  status            String
+  durationSeconds   Int          @default(0)
+  recordingUrl      String?
+  transcriptSummary String?
+  sentiment         String?      @default("NEUTRAL")
+  outcome           String?
+  metadata          Json?
+  conversationId    String?
+  createdAt         DateTime     @default(now())
+  tenant            Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer          User?        @relation("CallCustomer", fields: [customerId], references: [id])
+  phoneNumber       PhoneNumber? @relation("CallPhoneNumber", fields: [phoneNumberId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([customerId])
+  @@index([callSid])
+  @@index([phoneNumberId])
+}
+
+model AppointmentLog {
+  id              String   @id @default(uuid())
+  tenantId        String
+  customerId      String?
+  customerName    String?
+  customerEmail   String?
+  customerPhone   String?
+  appointmentTime DateTime
+  durationMinutes Int
+  status          String   @default("SCHEDULED")
+  eventId         String?
+  source          String?
+  notes           String?
+  metadata        Json?
+  conversationId  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        User?    @relation("AppointmentCustomer", fields: [customerId], references: [id])
+
+  @@index([tenantId, appointmentTime])
+  @@index([customerId])
+  @@index([status])
+}
+
+model FeedbackLog {
+  id             String   @id @default(uuid())
+  tenantId       String
+  customerId     String?
+  conversationId String?
+  rating         Int?
+  sentiment      String?  @default("NEUTRAL")
+  category       String?
+  feedback       String?
+  source         String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer       User?    @relation("FeedbackCustomer", fields: [customerId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([customerId])
+  @@index([rating])
 }

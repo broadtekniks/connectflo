@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Send, MessageSquare, User } from "lucide-react";
 import { api } from "../services/api";
 import { Message, Conversation } from "../types";
+import FeedbackModal from "./FeedbackModal";
 
 const TestChatWidget: React.FC = () => {
   const [customer, setCustomer] = useState<any>(null);
@@ -13,6 +14,8 @@ const TestChatWidget: React.FC = () => {
   const [isStarted, setIsStarted] = useState(false);
   const [chatMode, setChatMode] = useState<"SIMULATED" | "SELF">("SIMULATED");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackRequested, setFeedbackRequested] = useState(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -97,13 +100,24 @@ const TestChatWidget: React.FC = () => {
         if (data && data.messages) {
           setMessages(data.messages);
         }
+
+        // Check if conversation was resolved and show feedback modal
+        if (data && data.status === "RESOLVED" && !feedbackRequested) {
+          setFeedbackRequested(true);
+          setShowFeedback(true);
+        }
+
+        // Update conversation state to reflect status changes
+        if (data) {
+          setConversation(data);
+        }
       } catch (e) {
         console.error("Polling error", e);
       }
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [conversation, customerToken]);
+  }, [conversation, customerToken, feedbackRequested]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -226,6 +240,16 @@ const TestChatWidget: React.FC = () => {
               </div>
             </div>
           ))}
+
+          {/* Show conversation closed message */}
+          {conversation?.status === "RESOLVED" && (
+            <div className="flex justify-center">
+              <div className="bg-slate-100 border border-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm">
+                ✓ Conversation closed
+              </div>
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -254,6 +278,18 @@ const TestChatWidget: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Customer Feedback Modal */}
+      <FeedbackModal
+        isOpen={showFeedback}
+        onClose={() => setShowFeedback(false)}
+        conversationId={conversation?.id}
+        customerId={customer?.id}
+        onSubmitSuccess={() => {
+          setShowFeedback(false);
+          alert("Thank you for your feedback!");
+        }}
+      />
     </div>
   );
 };

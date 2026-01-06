@@ -21,6 +21,13 @@ import TestChat from "./pages/TestChat";
 import Customers from "./pages/Customers";
 import TeamMembers from "./pages/TeamMembers";
 import Billing from "./pages/Billing";
+import Voicemails from "./pages/Voicemails";
+import Meetings from "./pages/Meetings";
+import Leads from "./pages/Leads";
+import CallLogs from "./pages/CallLogs";
+import Feedback from "./pages/Feedback";
+import WebPhoneDialer from "./components/WebPhoneDialer";
+import { api } from "./services/api";
 
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -32,6 +39,7 @@ const App: React.FC = () => {
     "SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER"
   >("AGENT");
   const [user, setUser] = useState<any>(null);
+  const [webPhoneEnabled, setWebPhoneEnabled] = useState<boolean>(false);
 
   const authenticatedViewFromPathname = (pathname: string): string => {
     const path = (pathname || "/").toLowerCase();
@@ -42,6 +50,11 @@ const App: React.FC = () => {
     if (path.startsWith("/phone-numbers")) return "phone-numbers";
     if (path.startsWith("/knowledge")) return "knowledge";
     if (path.startsWith("/inbox")) return "inbox";
+    if (path.startsWith("/voicemails")) return "voicemails";
+    if (path.startsWith("/meetings")) return "meetings";
+    if (path.startsWith("/leads")) return "leads";
+    if (path.startsWith("/call-logs")) return "call-logs";
+    if (path.startsWith("/feedback")) return "feedback";
     if (path.startsWith("/customers")) return "customers";
     if (path.startsWith("/team")) return "team";
     if (path.startsWith("/billing")) return "billing";
@@ -66,6 +79,11 @@ const App: React.FC = () => {
     const pathMap: Record<string, string> = {
       dashboard: "/dashboard",
       inbox: "/inbox",
+      voicemails: "/voicemails",
+      meetings: "/meetings",
+      leads: "/leads",
+      "call-logs": "/call-logs",
+      feedback: "/feedback",
       tenants: "/tenants",
       integrations: "/integrations",
       knowledge: "/knowledge",
@@ -107,6 +125,16 @@ const App: React.FC = () => {
       setPublicView(publicViewFromPathname(window.location.pathname));
     }
   }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+
+    // Agents need this flag to decide whether the dialer should show.
+    api.tenants
+      .getWebPhoneSettings()
+      .then((data) => setWebPhoneEnabled(Boolean(data?.webPhoneEnabled)))
+      .catch(() => setWebPhoneEnabled(false));
+  }, [isLoggedIn]);
 
   useEffect(() => {
     // Keep view in sync with browser navigation (back/forward).
@@ -161,6 +189,11 @@ const App: React.FC = () => {
     dashboard: ["SUPER_ADMIN", "TENANT_ADMIN", "AGENT"],
     tenants: ["SUPER_ADMIN"],
     inbox: ["TENANT_ADMIN", "AGENT"],
+    voicemails: ["TENANT_ADMIN", "AGENT"],
+    meetings: ["TENANT_ADMIN", "AGENT"],
+    leads: ["TENANT_ADMIN", "AGENT"],
+    "call-logs": ["TENANT_ADMIN", "AGENT"],
+    feedback: ["TENANT_ADMIN", "AGENT"],
     "phone-numbers": ["SUPER_ADMIN", "TENANT_ADMIN"],
     workflows: ["TENANT_ADMIN"],
     integrations: ["TENANT_ADMIN"],
@@ -198,6 +231,16 @@ const App: React.FC = () => {
     switch (currentView) {
       case "inbox":
         return <Inbox />;
+      case "voicemails":
+        return <Voicemails />;
+      case "meetings":
+        return <Meetings />;
+      case "leads":
+        return <Leads />;
+      case "call-logs":
+        return <CallLogs />;
+      case "feedback":
+        return <Feedback />;
       case "dashboard":
         return userRole === "AGENT" ? <AgentDashboard /> : <Dashboard />;
       case "tenants":
@@ -298,6 +341,12 @@ const App: React.FC = () => {
           </div>
         )}
         {renderAuthenticatedView()}
+        {(userRole === "TENANT_ADMIN" || userRole === "SUPER_ADMIN") && (
+          <WebPhoneDialer featureEnabled={webPhoneEnabled} />
+        )}
+        {userRole === "AGENT" && webPhoneEnabled && (
+          <WebPhoneDialer featureEnabled={webPhoneEnabled} />
+        )}
       </main>
     </div>
   );

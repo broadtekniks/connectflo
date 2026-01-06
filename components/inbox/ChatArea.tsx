@@ -43,6 +43,55 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   const [isGenerating, setIsGenerating] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [voicemailAudio, setVoicemailAudio] = useState<Record<string, string>>(
+    {}
+  );
+  const [voicemailLoading, setVoicemailLoading] = useState<
+    Record<string, boolean>
+  >({});
+  const [voicemailError, setVoicemailError] = useState<Record<string, string>>(
+    {}
+  );
+
+  const isVoicemailMessage = (msg: Message) => {
+    return (
+      conversation.channel === ChannelType.VOICE &&
+      msg.sender === MessageSender.CUSTOMER &&
+      Array.isArray(msg.attachments) &&
+      msg.attachments.length > 0
+    );
+  };
+
+  const stripRecordingUrl = (text: string) => {
+    return String(text || "")
+      .replace(/\s*Recording:\s*https?:\/\/\S+/gi, "")
+      .trim();
+  };
+
+  const loadVoicemailAudio = async (messageId: string) => {
+    if (!messageId) return;
+    if (voicemailAudio[messageId] || voicemailLoading[messageId]) return;
+
+    setVoicemailLoading((prev) => ({ ...prev, [messageId]: true }));
+    setVoicemailError((prev) => {
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+
+    try {
+      const blob = await api.getBlob(`/voicemails/${messageId}/audio`);
+      const objectUrl = URL.createObjectURL(blob);
+      setVoicemailAudio((prev) => ({ ...prev, [messageId]: objectUrl }));
+    } catch (err: any) {
+      setVoicemailError((prev) => ({
+        ...prev,
+        [messageId]: err?.message || "Failed to load voicemail audio",
+      }));
+    } finally {
+      setVoicemailLoading((prev) => ({ ...prev, [messageId]: false }));
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -50,6 +99,20 @@ const ChatArea: React.FC<ChatAreaProps> = ({
     }
     setAiSuggestion(null);
   }, [conversation.messages]);
+
+  useEffect(() => {
+    // Cleanup audio object URLs when switching conversations.
+    return () => {
+      Object.values(voicemailAudio).forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.id]);
 
   const handleGenerateAi = async () => {
     setIsGenerating(true);
@@ -246,6 +309,10 @@ const ChatArea: React.FC<ChatAreaProps> = ({
               const isMe = msg.sender === MessageSender.AGENT;
               const isAI = msg.sender === MessageSender.AI;
               const isSystem = msg.sender === MessageSender.SYSTEM;
+              const isVoicemail = isVoicemailMessage(msg);
+              const displayContent = isVoicemail
+                ? stripRecordingUrl(msg.content)
+                : msg.content;
 
               if (isSystem) {
                 return (
@@ -331,9 +398,88 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                               ),
                             }}
                           >
-                            {msg.content}
+                            {displayContent}
                           </ReactMarkdown>
                         </div>
+
+                        {isVoicemail && (
+                          <div className="mt-3">
+                            {voicemailAudio[msg.id] ? (
+                              <div
+                                className={`rounded-lg border px-3 py-2 ${
+                                  isMe
+                                    ? "bg-slate-50 border-slate-200"
+                                    : "bg-white/10 border-white/20"
+                                }`}
+                              >
+                                <div
+                                  className={`mb-2 text-[10px] font-bold uppercase tracking-wide ${
+                                    isMe ? "text-slate-500" : "text-white/80"
+                                  }`}
+                                >
+                                  Voicemail
+                                </div>
+                                <audio
+                                  controls
+                                  preload="none"
+                                  className="w-full"
+                                  src={voicemailAudio[msg.id]}
+                                />
+                              </div>
+                            ) : (
+                              <div
+                                className={`rounded-lg border px-3 py-2 flex items-center justify-between gap-3 ${
+                                  isMe
+                                    ? "bg-slate-50 border-slate-200"
+                                    : "bg-white/10 border-white/20"
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div
+                                    className={`text-xs font-semibold ${
+                                      isMe ? "text-slate-700" : "text-white"
+                                    }`}
+                                  >
+                                    Voicemail recording
+                                  </div>
+                                  {voicemailError[msg.id] ? (
+                                    <div
+                                      className={`mt-0.5 text-[11px] ${
+                                        isMe ? "text-red-600" : "text-rose-200"
+                                      }`}
+                                    >
+                                      {voicemailError[msg.id]}
+                                    </div>
+                                  ) : (
+                                    <div
+                                      className={`mt-0.5 text-[11px] ${
+                                        isMe
+                                          ? "text-slate-500"
+                                          : "text-white/70"
+                                      }`}
+                                    >
+                                      Click to load audio
+                                    </div>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => loadVoicemailAudio(msg.id)}
+                                  disabled={Boolean(voicemailLoading[msg.id])}
+                                  className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-60 ${
+                                    isMe
+                                      ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                                      : "bg-white text-indigo-700 hover:bg-indigo-50"
+                                  }`}
+                                >
+                                  {voicemailLoading[msg.id]
+                                    ? "Loading…"
+                                    : "Listen"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {isAI && (
                           <div className="absolute -top-2 -right-2 bg-indigo-100 text-indigo-700 text-[10px] px-1.5 py-0.5 rounded-full font-bold border border-indigo-200 shadow-sm">
                             AI

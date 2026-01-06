@@ -73,6 +73,22 @@ export class TelnyxService {
             );
           }
         }
+
+        // Configure messaging profile for SMS
+        const messagingProfile = await this.ensureMessagingProfile();
+        if (messagingProfile && numbers.data && numbers.data.length > 0) {
+          try {
+            await telnyx.messagingPhoneNumbers.create({
+              phone_number: phoneNumber,
+              messaging_profile_id: messagingProfile.id,
+            });
+            console.log(
+              `Configured ${phoneNumber} with messaging profile ${messagingProfile.name}`
+            );
+          } catch (msgError) {
+            console.error("Failed to add to messaging profile:", msgError);
+          }
+        }
       } catch (configError) {
         console.error(
           "Failed to configure number after purchase:",
@@ -121,6 +137,43 @@ export class TelnyxService {
       return newApp.data;
     } catch (error) {
       console.error("Failed to ensure Call Control App:", error);
+      return null;
+    }
+  }
+
+  async ensureMessagingProfile() {
+    if (!telnyx) return null;
+    const profileName = "ConnectFlo SMS";
+    const smsWebhookUrl =
+      process.env.TELNYX_SMS_WEBHOOK_URL || 
+      "http://localhost:3002/webhooks/telnyx/sms";
+
+    try {
+      const profiles = await telnyx.messagingProfiles.list();
+
+      if (profiles.data && profiles.data.length > 0) {
+        const existing = profiles.data.find((p: any) => p.name === profileName);
+        if (existing) {
+          // Update webhook URL if changed
+          if (existing.webhook_url !== smsWebhookUrl) {
+            await telnyx.messagingProfiles.update(existing.id, {
+              webhook_url: smsWebhookUrl,
+              webhook_failover_url: smsWebhookUrl,
+            });
+          }
+          return existing;
+        }
+      }
+
+      const newProfile = await telnyx.messagingProfiles.create({
+        name: profileName,
+        webhook_url: smsWebhookUrl,
+        webhook_failover_url: smsWebhookUrl,
+        webhook_api_version: "2",
+      });
+      return newProfile.data;
+    } catch (error) {
+      console.error("Failed to ensure Messaging Profile:", error);
       return null;
     }
   }

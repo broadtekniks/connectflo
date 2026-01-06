@@ -13,6 +13,11 @@ import {
   LogOut,
   MessageSquare,
   Menu,
+  PhoneCall,
+  Calendar,
+  UserPlus,
+  PhoneIncoming,
+  MessageCircle,
 } from "lucide-react";
 
 import { api } from "../services/api";
@@ -81,6 +86,36 @@ const Sidebar: React.FC<SidebarProps> = ({
       roles: ["TENANT_ADMIN", "AGENT"],
     },
     {
+      id: "voicemails",
+      label: "Voicemails",
+      icon: PhoneCall,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "meetings",
+      label: "Meetings",
+      icon: Calendar,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "leads",
+      label: "Leads",
+      icon: UserPlus,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "call-logs",
+      label: "Call Logs",
+      icon: PhoneIncoming,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "feedback",
+      label: "Feedback",
+      icon: MessageCircle,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
       id: "phone-numbers",
       label: "Phone Numbers",
       icon: Phone,
@@ -114,7 +149,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       id: "team",
       label: "Team",
       icon: Users,
-      roles: ["TENANT_ADMIN"],
+      roles: ["TENANT_ADMIN", "AGENT"],
     },
     {
       id: "billing",

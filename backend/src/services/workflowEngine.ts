@@ -10,6 +10,8 @@ import { GoogleCalendarService } from "./integrations/google/calendar";
 import { GoogleGmailService } from "./integrations/google/gmail";
 import { GoogleDriveService } from "./integrations/google/drive";
 import { GoogleSheetsService } from "./integrations/google/sheets";
+import { buildIcsInvite } from "./calendarInvite";
+import { DateTime } from "luxon";
 
 interface WorkflowNode {
   id: string;
@@ -59,6 +61,44 @@ export class WorkflowEngine {
   }
 
   /**
+   * Check if a time range falls within working hours
+   */
+  private checkWithinWorkingHours(
+    startTime: string,
+    endTime: string,
+    workingHours: Record<string, { start: string; end: string } | null>,
+    workingHoursTimeZone: string
+  ): boolean {
+    const start = DateTime.fromISO(startTime, { zone: workingHoursTimeZone });
+    const end = DateTime.fromISO(endTime, { zone: workingHoursTimeZone });
+
+    if (!start.isValid || !end.isValid) {
+      return false;
+    }
+
+    // Get day of week (lowercase: monday, tuesday, etc.)
+    const dayOfWeek = start.weekdayLong?.toLowerCase();
+    if (!dayOfWeek) return false;
+
+    // Get working hours for this day
+    const dayHours = workingHours[dayOfWeek];
+    if (!dayHours || !dayHours.start || !dayHours.end) {
+      // Day is not configured or marked as closed
+      return false;
+    }
+
+    // Parse working hours times (format: "HH:mm")
+    const [startHour, startMin] = dayHours.start.split(':').map(Number);
+    const [endHour, endMin] = dayHours.end.split(':').map(Number);
+
+    const workStart = start.set({ hour: startHour, minute: startMin, second: 0 });
+    const workEnd = start.set({ hour: endHour, minute: endMin, second: 0 });
+
+    // Check if appointment is within working hours
+    return start >= workStart && end <= workEnd;
+  }
+
+  /**
    * Entry point for external events (Webhooks, API calls)
    */
   async trigger(triggerType: string, contextData: any) {
@@ -70,6 +110,14 @@ export class WorkflowEngine {
       },
       include: {
         aiConfig: true,
+        assignedAgent: {
+          select: {
+            id: true,
+            name: true,
+            agentTimeZone: true,
+            workingHours: true,
+          },
+        },
         phoneNumbers: {
           include: { phoneNumber: true },
         },
@@ -83,7 +131,7 @@ export class WorkflowEngine {
         integrations: {
           include: { integration: true },
         },
-      },
+      } as any,
     });
 
     if (!workflow) {
@@ -136,6 +184,7 @@ export class WorkflowEngine {
           : undefined,
       resources: {
         aiConfig: (workflow as any).aiConfig,
+        assignedAgent: (workflow as any).assignedAgent || undefined,
         phoneNumbers: (workflow as any).phoneNumbers.map(
           (wp: any) => wp.phoneNumber
         ),
@@ -143,7 +192,7 @@ export class WorkflowEngine {
         integrations: (workflow as any).integrations.map(
           (wi: any) => wi.integration
         ),
-      },
+      } as any,
     };
 
     // Preserve legacy context for backward compatibility
@@ -262,6 +311,11 @@ export class WorkflowEngine {
           await this.handleAction(node, resolvedConfig, context, legacyContext);
           break;
 
+        case "integration":
+          // Integration nodes are executed the same way as action nodes.
+          await this.handleAction(node, resolvedConfig, context, legacyContext);
+          break;
+
         case "condition":
           // Evaluate condition and determine which path to take
           const conditionConfig = node.config?.condition as ConditionConfig;
@@ -315,6 +369,38 @@ export class WorkflowEngine {
               );
             }
             return; // Exit early since we handled routing
+          }
+
+          // Fallback for unlabeled condition branches: if there are exactly 2 outgoing edges
+          // and they are both unlabeled, treat the first as "yes" and the second as "no".
+          const unlabeledEdges = conditionOutgoingEdges.filter(
+            (e) => !e.label || !String(e.label).trim()
+          );
+          if (
+            conditionOutgoingEdges.length === 2 &&
+            unlabeledEdges.length === 2
+          ) {
+            const fallbackEdge = conditionResult
+              ? conditionOutgoingEdges[0]
+              : conditionOutgoingEdges[1];
+            console.warn(
+              `[WorkflowEngine] Condition edges are unlabeled; using fallback routing (${
+                conditionResult ? "yes" : "no"
+              } -> ${fallbackEdge.id}). ` +
+                `FIX: label edges "yes"/"no" in the workflow builder to make this explicit.`
+            );
+            const nextNode = nodes.find((n) => n.id === fallbackEdge.target);
+            if (nextNode) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              await this.executeNode(
+                nextNode,
+                nodes,
+                edges,
+                context,
+                legacyContext
+              );
+            }
+            return;
           }
 
           console.warn(
@@ -454,46 +540,401 @@ export class WorkflowEngine {
         // Handle agent assignment
         break;
 
+      case "End Chat":
+        // Close the conversation and mark as resolved
+        try {
+          const conversationId =
+            context.conversation?.id ||
+            (context.execution as any).conversationId;
+
+          if (conversationId) {
+            await prisma.conversation.update({
+              where: { id: conversationId },
+              data: {
+                status: "RESOLVED",
+                lastActivity: new Date(),
+              },
+            });
+            console.log(
+              `[WorkflowEngine] Conversation ${conversationId} marked as RESOLVED`
+            );
+
+            // Send optional goodbye message
+            if (config?.message) {
+              const goodbyeMessage = config.message;
+
+              if (
+                context.conversation?.channel === "CHAT" ||
+                context.conversation?.channel === "SMS"
+              ) {
+                // Send message to conversation
+                await prisma.message.create({
+                  data: {
+                    conversationId,
+                    tenantId: context.execution.tenantId,
+                    content: goodbyeMessage,
+                    sender: "AI",
+                  },
+                });
+                console.log(
+                  `[WorkflowEngine] Sent goodbye message to conversation ${conversationId}`
+                );
+              }
+            }
+          } else {
+            console.warn("[WorkflowEngine] End Chat: No conversation ID found");
+          }
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to end chat:", error);
+        }
+        break;
+
+      case "End Call":
+        // Terminate voice call with closing message
+        try {
+          let closingMessage = config?.message;
+
+          // Generate AI closing message if not provided
+          if (!closingMessage) {
+            const callState = legacyContext.callControlId
+              ? this.activeCalls.get(legacyContext.callControlId)
+              : null;
+
+            const conversationHistory = callState?.history || [];
+
+            try {
+              const messages = [
+                {
+                  role: "system" as const,
+                  content:
+                    "Generate a brief, professional closing message for ending a phone call. Keep it under 20 words. Examples: 'Thank you for calling. Have a great day!', 'Thanks for reaching out. Goodbye!', 'Have a wonderful day. Goodbye!'",
+                },
+                ...(conversationHistory.length > 0
+                  ? [
+                      {
+                        role: "user" as const,
+                        content:
+                          "Generate a closing message based on our conversation.",
+                      },
+                    ]
+                  : [
+                      {
+                        role: "user" as const,
+                        content: "Generate a professional closing message.",
+                      },
+                    ]),
+              ];
+
+              closingMessage = await this.aiService.generateResponse(messages);
+              closingMessage = closingMessage.trim();
+              console.log(
+                `[WorkflowEngine] AI-generated closing message: ${closingMessage}`
+              );
+            } catch (aiError) {
+              console.error(
+                "[WorkflowEngine] Failed to generate AI closing message:",
+                aiError
+              );
+              closingMessage = "Thank you for calling. Have a great day!";
+            }
+          }
+
+          // Speak closing message before hanging up
+          if (legacyContext.type === "voice" && legacyContext.callControlId) {
+            console.log(
+              `[WorkflowEngine] Speaking closing message: ${closingMessage}`
+            );
+
+            await this.telnyxService.speakText(
+              legacyContext.callControlId,
+              closingMessage
+            );
+
+            // Wait for speech to complete (estimate based on message length)
+            const estimatedDuration = Math.max(
+              2000,
+              closingMessage.length * 100
+            );
+            await new Promise((resolve) =>
+              setTimeout(resolve, estimatedDuration)
+            );
+
+            // Now hang up the call
+            await this.telnyxService.hangupCall(legacyContext.callControlId);
+            this.activeCalls.delete(legacyContext.callControlId);
+            console.log(
+              `[WorkflowEngine] Ended call ${legacyContext.callControlId} after closing message`
+            );
+          } else if (context.call?.sid) {
+            // For Twilio calls - would need TwilioService instance
+            console.log(
+              `[WorkflowEngine] End Call node - Twilio call ${context.call.sid}`
+            );
+            // Note: TwilioRealtimeVoiceService handles this automatically via END_CALL_MARKER
+          } else {
+            console.warn("[WorkflowEngine] End Call: No active call found");
+          }
+        } catch (error) {
+          console.error("[WorkflowEngine] Failed to end call:", error);
+        }
+        break;
+
       // Google Calendar Actions
       case "Create Calendar Event":
         try {
-          const eventResult = await this.googleCalendar.createEvent(
-            context.execution.tenantId,
-            {
-              summary: config?.summary || "Meeting",
-              description: config?.description,
-              startTime: config?.startTime,
-              endTime: config?.endTime,
-              attendees: config?.attendees
-                ?.split(",")
-                .map((e: string) => e.trim()),
-              location: config?.location,
-              timeZone: config?.timeZone,
+          // Recommended default: generate a universal .ics invite and email it.
+          const rawAttendees = String(config?.attendees ?? "");
+          const attendees = rawAttendees
+            .split(",")
+            .map((e: string) => e.trim())
+            .filter(Boolean);
+
+          const fallbackRecipient = String(
+            context.customer?.email ?? ""
+          ).trim();
+          const to =
+            attendees.length > 0
+              ? attendees
+              : fallbackRecipient
+              ? [fallbackRecipient]
+              : [];
+
+          if (to.length === 0) {
+            console.warn(
+              "[WorkflowEngine] Create Calendar Event: No attendees/to address provided and customer.email is empty"
+            );
+            break;
+          }
+
+          const summary =
+            String(config?.summary ?? "Meeting").trim() || "Meeting";
+          const description =
+            String(config?.description ?? "").trim() || undefined;
+          const location = String(config?.location ?? "").trim() || undefined;
+          const triggerSource: any = (context as any)?.trigger?.source;
+          const triggerBooking: any = triggerSource?.booking;
+
+          const startTime =
+            String(config?.startTime ?? "").trim() ||
+            String(triggerSource?.startTime ?? "").trim() ||
+            String(triggerBooking?.startTime ?? "").trim() ||
+            String(
+              variableResolver.get(
+                "variables.workflow.booking.startTime",
+                context
+              ) ?? ""
+            ).trim();
+
+          const endTime =
+            String(config?.endTime ?? "").trim() ||
+            String(triggerSource?.endTime ?? "").trim() ||
+            String(triggerBooking?.endTime ?? "").trim() ||
+            String(
+              variableResolver.get(
+                "variables.workflow.booking.endTime",
+                context
+              ) ?? ""
+            ).trim();
+
+          const timeZone =
+            String(config?.timeZone ?? "").trim() ||
+            String(triggerSource?.timeZone ?? "").trim() ||
+            String(triggerBooking?.timeZone ?? "").trim() ||
+            "UTC";
+
+          if (!startTime || !endTime) {
+            console.warn(
+              "[WorkflowEngine] Create Calendar Event: Missing startTime and/or endTime"
+            );
+            break;
+          }
+
+          // Validate against working hours (agent's if assigned, otherwise tenant's business hours)
+          const assignedAgent = (context.resources as any)?.assignedAgent;
+          const tenantPrefs = await prisma.tenant.findUnique({
+            where: { id: context.execution.tenantId },
+            select: { 
+              calendarAutoAddMeet: true,
+              businessHours: true,
+              businessTimeZone: true,
+            },
+          });
+
+          const workingHours = assignedAgent?.workingHours || tenantPrefs?.businessHours;
+          const workingHoursTimeZone = assignedAgent?.agentTimeZone || tenantPrefs?.businessTimeZone || timeZone;
+          
+          if (workingHours && typeof workingHours === 'object') {
+            const isWithinWorkingHours = this.checkWithinWorkingHours(
+              startTime,
+              endTime,
+              workingHours as any,
+              workingHoursTimeZone
+            );
+            
+            if (!isWithinWorkingHours) {
+              const scheduleName = assignedAgent ? `${assignedAgent.name}'s schedule` : 'business hours';
+              console.warn(
+                `[WorkflowEngine] Create Calendar Event: Time ${startTime} is outside ${scheduleName}`
+              );
+              break;
             }
-          );
+          }
+
+          // If the tenant has Google Calendar connected, create the event there as well.
+          // This is best-effort: failures fall back to .ics email only.
+          let googleEvent: {
+            eventId?: string;
+            htmlLink?: string;
+            meetLink?: string;
+          } | null = null;
+          try {
+
+            const addMeet =
+              typeof config?.addMeeting === "boolean"
+                ? Boolean(config.addMeeting)
+                : tenantPrefs?.calendarAutoAddMeet ?? true;
+
+            const meetingProvider = String(
+              config?.meetingProvider ?? ""
+            ).trim();
+
+            const googleResult = await this.googleCalendar.createEvent(
+              context.execution.tenantId,
+              {
+                summary,
+                description,
+                location,
+                startTime,
+                endTime,
+                attendees: Array.isArray(to) ? to : [String(to)],
+                timeZone,
+                sendUpdates: "none",
+                addMeet,
+                conferenceSolutionType: meetingProvider || undefined,
+              }
+            );
+
+            if (googleResult?.success) {
+              googleEvent = {
+                eventId: googleResult.eventId ?? undefined,
+                htmlLink: googleResult.htmlLink ?? undefined,
+                meetLink: googleResult.meetLink ?? undefined,
+              };
+
+              console.log(
+                `[WorkflowEngine] Google Calendar event created (id=${googleResult.eventId})`
+              );
+
+              if (googleResult.eventId) {
+                variableResolver.set(
+                  "variables.workflow.calendarEventId",
+                  googleResult.eventId,
+                  context
+                );
+              }
+              if (googleResult.htmlLink) {
+                variableResolver.set(
+                  "variables.workflow.calendarEventHtmlLink",
+                  googleResult.htmlLink,
+                  context
+                );
+              }
+              if (googleResult.meetLink) {
+                variableResolver.set(
+                  "variables.workflow.calendarMeetLink",
+                  googleResult.meetLink,
+                  context
+                );
+              }
+            }
+          } catch (error: any) {
+            const msg = String(error?.message ?? error ?? "");
+            if (msg.toLowerCase().includes("not connected")) {
+              console.log(
+                "[WorkflowEngine] Google Calendar not connected; sending .ics email invite only"
+              );
+            } else {
+              console.warn(
+                "[WorkflowEngine] Google Calendar event create failed; continuing with .ics email invite:",
+                error
+              );
+            }
+          }
+
+          const effectiveDescription =
+            googleEvent?.meetLink &&
+            !String(description ?? "").includes(googleEvent.meetLink)
+              ? [
+                  String(description ?? "").trim(),
+                  `Join: ${googleEvent.meetLink}`,
+                ]
+                  .filter(Boolean)
+                  .join("\n")
+              : description;
+
+          const { uid, ics } = buildIcsInvite({
+            summary,
+            description: effectiveDescription,
+            location,
+            startTime,
+            endTime,
+            timeZone,
+            organizerEmail: String(config?.from ?? "").trim() || undefined,
+            attendees: Array.isArray(to) ? to : [String(to)],
+          });
+
+          const subject =
+            String(config?.emailSubject ?? "").trim() ||
+            `Invitation: ${summary}`;
+          const body =
+            String(config?.emailBody ?? "").trim() ||
+            [
+              `You're invited: ${summary}`,
+              location ? `Location: ${location}` : "",
+              effectiveDescription ? `\n${effectiveDescription}` : "",
+              googleEvent?.htmlLink
+                ? `\nView in Google Calendar: ${googleEvent.htmlLink}`
+                : "",
+              "\nThis email includes an .ics calendar invite attachment.",
+            ]
+              .filter(Boolean)
+              .join("\n");
+
+          await this.emailService.sendEmail({
+            to,
+            subject,
+            body,
+            isHtml: false,
+            from: config?.from,
+            replyTo: config?.replyTo,
+            attachments: [
+              {
+                filename: "invite.ics",
+                content: ics,
+                contentType: "text/calendar; charset=utf-8; method=REQUEST",
+              },
+            ],
+          });
+
           console.log(
-            `[WorkflowEngine] Calendar event created: ${eventResult.eventId}`
+            `[WorkflowEngine] Calendar invite sent (uid=${uid}) to ${
+              Array.isArray(to) ? to.join(", ") : to
+            }`
           );
 
-          // Store result in context variables
           variableResolver.set(
-            "variables.workflow.calendarEventId",
-            eventResult.eventId,
+            "variables.workflow.calendarInviteUid",
+            uid,
             context
           );
           variableResolver.set(
-            "variables.workflow.calendarEventLink",
-            eventResult.htmlLink,
-            context
-          );
-          variableResolver.set(
-            "variables.workflow.meetLink",
-            eventResult.meetLink,
+            "variables.workflow.calendarInviteRecipients",
+            Array.isArray(to) ? to.join(",") : String(to),
             context
           );
         } catch (error) {
           console.error(
-            "[WorkflowEngine] Failed to create calendar event:",
+            "[WorkflowEngine] Failed to send calendar invite:",
             error
           );
         }
@@ -521,7 +962,35 @@ export class WorkflowEngine {
             context
           );
         } catch (error) {
-          console.error("[WorkflowEngine] Failed to send Gmail:", error);
+          const errAny = error as any;
+          const errMessage = String(
+            errAny?.message ||
+              errAny?.response?.data?.error?.message ||
+              "Failed to send Gmail"
+          );
+
+          const isApiDisabled =
+            /gmail api has not been used|gmail\.googleapis\.com|it is disabled/i.test(
+              errMessage
+            );
+
+          if (isApiDisabled) {
+            console.error(
+              "[WorkflowEngine] Failed to send Gmail: Gmail API is disabled for the Google Cloud project used by your OAuth client. " +
+                "Enable the Gmail API in Google Cloud Console for that project, then retry (may take a few minutes to propagate).\n" +
+                `Details: ${errMessage}`
+            );
+          } else {
+            console.error(
+              `[WorkflowEngine] Failed to send Gmail: ${errMessage}`
+            );
+          }
+
+          variableResolver.set(
+            "variables.workflow.gmailSendError",
+            errMessage,
+            context
+          );
         }
         break;
 
@@ -559,11 +1028,35 @@ export class WorkflowEngine {
       // Google Sheets Actions
       case "Add Row to Sheet":
         try {
+          const spreadsheetId = variableResolver.resolve(
+            config?.spreadsheetId || "",
+            context
+          );
+          const sheetName = variableResolver.resolve(
+            config?.sheetName || "Sheet1",
+            context
+          );
+
+          // Resolve variables in row values
+          const rawValues = Array.isArray(config?.values) ? config.values : [];
+          const resolvedValues = rawValues.map((val: any) =>
+            typeof val === "string"
+              ? variableResolver.resolve(val, context)
+              : val
+          );
+
+          if (!spreadsheetId) {
+            console.warn(
+              "[WorkflowEngine] No spreadsheet ID provided for Add Row to Sheet"
+            );
+            break;
+          }
+
           const sheetResult = await this.googleSheets.appendRow(
             context.execution.tenantId,
-            config?.spreadsheetId,
-            config?.sheetName || "Sheet1",
-            config?.values || []
+            spreadsheetId,
+            sheetName,
+            resolvedValues
           );
           console.log(
             `[WorkflowEngine] Row added to sheet: ${sheetResult.updatedRange}`
@@ -574,6 +1067,49 @@ export class WorkflowEngine {
             sheetResult.updatedRange,
             context
           );
+
+          // If this is a lead capture, save to database too
+          if (config?.saveAsLead) {
+            try {
+              await prisma.leadCapture.create({
+                data: {
+                  tenantId: context.execution.tenantId,
+                  customerId: context.customer?.id,
+                  name:
+                    variableResolver.resolve(config?.leadName || "", context) ||
+                    context.customer?.name,
+                  email:
+                    variableResolver.resolve(
+                      config?.leadEmail || "",
+                      context
+                    ) || context.customer?.email,
+                  phone: variableResolver.resolve(
+                    config?.leadPhone || "",
+                    context
+                  ),
+                  source: (context.trigger as any)?.channel || "workflow",
+                  status: "NEW",
+                  notes: variableResolver.resolve(
+                    config?.leadNotes || "",
+                    context
+                  ),
+                  spreadsheetId,
+                  conversationId: (context.execution as any).conversationId,
+                  metadata: {
+                    workflowId: context.execution.workflowId,
+                    nodeId: node.id,
+                    sheetName,
+                  },
+                },
+              });
+              console.log("[WorkflowEngine] Lead capture saved to database");
+            } catch (leadError) {
+              console.error(
+                "[WorkflowEngine] Failed to save lead capture:",
+                leadError
+              );
+            }
+          }
         } catch (error) {
           console.error("[WorkflowEngine] Failed to add row to sheet:", error);
         }

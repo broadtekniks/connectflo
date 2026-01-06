@@ -36,6 +36,10 @@ import {
   Calendar,
   Upload,
   Database,
+  PhoneOff,
+  UserCheck,
+  Users,
+  PhoneForwarded,
 } from "lucide-react";
 
 const API_URL = "http://localhost:3002/api";
@@ -75,7 +79,7 @@ const CONFIG_CATEGORY_NAME = "Configuration";
 const CONFIG_NODE_LABELS = new Set([
   "Knowledge Base",
   "AI Configuration",
-  "Phone Voice",
+  "Agent Assignment",
 ]);
 
 const COMPONENT_LIBRARY = [
@@ -118,10 +122,10 @@ const COMPONENT_LIBRARY = [
         subLabel: "Set AI behavior",
       },
       {
-        label: "Phone Voice",
-        icon: Phone,
+        label: "Agent Assignment",
+        icon: UserCheck,
         type: "config",
-        subLabel: "Voice & language",
+        subLabel: "Assign agent & hours",
       },
     ],
   },
@@ -171,6 +175,12 @@ const COMPONENT_LIBRARY = [
       },
       { label: "Send Email", icon: Mail, type: "action", subLabel: "Outbound" },
       {
+        label: "Create Calendar Event",
+        icon: Calendar,
+        type: "action",
+        subLabel: "Email .ics invite",
+      },
+      {
         label: "Assign Agent",
         icon: UserPlus,
         type: "action",
@@ -189,6 +199,24 @@ const COMPONENT_LIBRARY = [
         type: "action",
         subLabel: "Close conversation",
       },
+      {
+        label: "End Call",
+        icon: PhoneOff,
+        type: "action",
+        subLabel: "Hang up call",
+      },
+      {
+        label: "Call Group",
+        icon: Users,
+        type: "action",
+        subLabel: "Ring multiple agents",
+      },
+      {
+        label: "Call Forwarding",
+        icon: PhoneForwarded,
+        type: "action",
+        subLabel: "Transfer call",
+      },
     ],
   },
   {
@@ -197,13 +225,6 @@ const COMPONENT_LIBRARY = [
     bg: "bg-white",
     border: "border-blue-200",
     items: [
-      {
-        label: "Create Calendar Event",
-        icon: Calendar,
-        type: "integration",
-        subLabel: "Google Calendar",
-        provider: "google",
-      },
       {
         label: "Send Gmail",
         icon: Mail,
@@ -950,7 +971,19 @@ const Workflows: React.FC = () => {
   useEffect(() => {
     loadWorkflows();
     fetchConnectedIntegrations();
+    fetchTenantBusinessHours();
   }, []);
+
+  const fetchTenantBusinessHours = async () => {
+    try {
+      const data = await api.tenants.getBusinessHours();
+      if (typeof data?.maxMeetingDurationMinutes === "number") {
+        setTenantMaxMeetingDuration(data.maxMeetingDurationMinutes);
+      }
+    } catch (error) {
+      console.error("Failed to fetch tenant business hours:", error);
+    }
+  };
 
   const loadWorkflows = async () => {
     try {
@@ -988,9 +1021,60 @@ const Workflows: React.FC = () => {
   const [showMobileLibrary, setShowMobileLibrary] = useState(false);
   const [isLibraryCollapsed, setIsLibraryCollapsed] = useState(false);
 
+  const [gmailSenderStatus, setGmailSenderStatus] = useState<{
+    state: "idle" | "loading" | "loaded" | "error";
+    email?: string;
+  }>({ state: "idle" });
+
+  const [calendarConferenceStatus, setCalendarConferenceStatus] = useState<{
+    state: "idle" | "loading" | "loaded" | "error";
+    connected?: boolean;
+    allowedTypes?: string[];
+  }>({ state: "idle" });
+
+  const [tenantMaxMeetingDuration, setTenantMaxMeetingDuration] =
+    useState<number>(60);
+
+  // Sidebar resize state
+  const [sidebarWidth, setSidebarWidth] = useState<number>(320); // 320px = w-80 default
+  const [isResizing, setIsResizing] = useState<boolean>(false);
+
+  // Resize handlers
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleResizeMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const newWidth = window.innerWidth - e.clientX;
+      // Constrain width between 280px and 800px
+      const constrainedWidth = Math.max(280, Math.min(800, newWidth));
+      setSidebarWidth(constrainedWidth);
+    };
+
+    const handleResizeEnd = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener("mousemove", handleResizeMove);
+      document.addEventListener("mouseup", handleResizeEnd);
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+      return () => {
+        document.removeEventListener("mousemove", handleResizeMove);
+        document.removeEventListener("mouseup", handleResizeEnd);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+    }
+  }, [isResizing]);
+
   // Workflow-level configuration (persistent resources, not canvas nodes)
   const [activeWorkflowConfigPanel, setActiveWorkflowConfigPanel] = useState<
-    null | "knowledgeBase" | "aiConfig" | "phoneVoice"
+    null | "knowledgeBase" | "aiConfig" | "agentAssignment"
   >(null);
 
   const configCategory = COMPONENT_LIBRARY.find(
@@ -1174,13 +1258,14 @@ const Workflows: React.FC = () => {
     documents: [],
     integrations: [],
     aiConfig: null,
-    phoneVoiceId: null,
-    phoneVoiceLanguage: null,
     toneOfVoice: null,
+    assignedAgent: null,
   });
   const [availableDocuments, setAvailableDocuments] = useState<any[]>([]);
   const [availableIntegrations, setAvailableIntegrations] = useState<any[]>([]);
   const [availableAiConfigs, setAvailableAiConfigs] = useState<any[]>([]);
+  const [availableAgents, setAvailableAgents] = useState<any[]>([]);
+  const [availableCallGroups, setAvailableCallGroups] = useState<any[]>([]);
   const [availablePhoneVoices, setAvailablePhoneVoices] = useState<
     PhoneVoiceOption[]
   >([]);
@@ -1234,6 +1319,91 @@ const Workflows: React.FC = () => {
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const fetchGmailSender = async () => {
+      if (!selectedNode || selectedNode.label !== "Send Gmail") {
+        setGmailSenderStatus({ state: "idle" });
+        return;
+      }
+
+      setGmailSenderStatus({ state: "loading" });
+      try {
+        const response = await fetch(
+          `${API_URL}/integrations/google/gmail/profile`,
+          {
+            headers: authHeader(),
+            signal: controller.signal,
+          }
+        );
+
+        if (!response.ok) {
+          setGmailSenderStatus({ state: "error" });
+          return;
+        }
+
+        const data = await response.json();
+        if (data?.connected && data?.email) {
+          setGmailSenderStatus({ state: "loaded", email: data.email });
+        } else {
+          setGmailSenderStatus({ state: "error" });
+        }
+      } catch (error: any) {
+        if (error?.name === "AbortError") return;
+        setGmailSenderStatus({ state: "error" });
+      }
+    };
+
+    fetchGmailSender();
+
+    return () => controller.abort();
+  }, [selectedNodeId, selectedNode?.label]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const fetchConferenceSolutions = async () => {
+      if (!selectedNode || selectedNode.label !== "Create Calendar Event") {
+        setCalendarConferenceStatus({ state: "idle" });
+        return;
+      }
+
+      setCalendarConferenceStatus({ state: "loading" });
+      try {
+        const response = await fetch(
+          `${API_URL}/integrations/google/calendar/conference-solutions`,
+          {
+            headers: authHeader(),
+            signal: controller.signal,
+          }
+        );
+
+        if (!response.ok) {
+          setCalendarConferenceStatus({ state: "error" });
+          return;
+        }
+
+        const data = await response.json();
+        const allowedTypes = Array.isArray(data?.allowedConferenceSolutionTypes)
+          ? data.allowedConferenceSolutionTypes
+          : [];
+        setCalendarConferenceStatus({
+          state: "loaded",
+          connected: Boolean(data?.connected),
+          allowedTypes,
+        });
+      } catch (error: any) {
+        if (error?.name === "AbortError") return;
+        setCalendarConferenceStatus({ state: "error" });
+      }
+    };
+
+    fetchConferenceSolutions();
+
+    return () => controller.abort();
+  }, [selectedNodeId, selectedNode?.label]);
+
   // --- Resource Management Functions ---
 
   const loadWorkflowResources = async () => {
@@ -1282,6 +1452,23 @@ const Workflows: React.FC = () => {
         const config = await aiConfigsResponse.json();
         // The endpoint returns a single config, wrap it in an array
         setAvailableAiConfigs(config ? [config] : []);
+      }
+
+      // Load assignable users (admins + agents; excludes customers)
+      const agentsResponse = await fetch(`${API_URL}/team-members`, {
+        headers: authHeader(),
+      });
+      if (agentsResponse.ok) {
+        const agents = await agentsResponse.json();
+        setAvailableAgents(Array.isArray(agents) ? agents : []);
+      }
+      // Load call groups
+      const callGroupsResponse = await fetch(`${API_URL}/call-groups`, {
+        headers: authHeader(),
+      });
+      if (callGroupsResponse.ok) {
+        const groups = await callGroupsResponse.json();
+        setAvailableCallGroups(Array.isArray(groups) ? groups : []);
       }
     } catch (error) {
       console.error("Failed to load available resources:", error);
@@ -1412,46 +1599,6 @@ const Workflows: React.FC = () => {
     }
   };
 
-  const setWorkflowPhoneVoice = async (
-    phoneVoiceId: string,
-    phoneVoiceLanguage: string
-  ) => {
-    if (!selectedWorkflowMeta?.id) return;
-    try {
-      const response = await fetch(
-        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/phone-voice`,
-        {
-          method: "PUT",
-          headers: authHeader(),
-          body: JSON.stringify({ phoneVoiceId, phoneVoiceLanguage }),
-        }
-      );
-      if (response.ok) {
-        await loadWorkflowResources();
-      }
-    } catch (error) {
-      console.error("Failed to set workflow phone voice:", error);
-    }
-  };
-
-  const clearWorkflowPhoneVoice = async () => {
-    if (!selectedWorkflowMeta?.id) return;
-    try {
-      const response = await fetch(
-        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/phone-voice`,
-        {
-          method: "DELETE",
-          headers: authHeader(),
-        }
-      );
-      if (response.ok) {
-        await loadWorkflowResources();
-      }
-    } catch (error) {
-      console.error("Failed to clear workflow phone voice:", error);
-    }
-  };
-
   const setWorkflowToneOfVoice = async (toneOfVoice: string) => {
     if (!selectedWorkflowMeta?.id) return;
     try {
@@ -1489,12 +1636,29 @@ const Workflows: React.FC = () => {
     }
   };
 
+  const assignAgent = async (agentId: string | null) => {
+    if (!selectedWorkflowMeta?.id) return;
+    try {
+      const response = await api.workflows.update(selectedWorkflowMeta.id, {
+        assignedAgentId: agentId,
+      });
+      await loadWorkflows();
+      await loadWorkflowResources();
+    } catch (error) {
+      console.error("Failed to assign agent:", error);
+    }
+  };
+
+  const removeAgent = async () => {
+    await assignAgent(null);
+  };
+
   const getWorkflowConfigPanelKey = (
     label: string
-  ): "knowledgeBase" | "aiConfig" | "phoneVoice" => {
+  ): "knowledgeBase" | "aiConfig" | "agentAssignment" => {
     if (label === "Knowledge Base") return "knowledgeBase";
-    if (label === "AI Configuration") return "aiConfig";
-    return "phoneVoice";
+    if (label === "Agent Assignment") return "agentAssignment";
+    return "aiConfig";
   };
 
   const stripConfigNodesFromGraph = (
@@ -1639,6 +1803,7 @@ const Workflows: React.FC = () => {
     const nodesToSave = strippedForSave.nodes;
     const edgesToSave = strippedForSave.edges;
 
+    // Check for Send Email validation
     const invalidSendEmailNodes = nodesToSave
       .filter((n) => n.label === "Send Email")
       .map((n) => ({ nodeId: n.id, missing: getMissingSendEmailFields(n) }))
@@ -1656,6 +1821,24 @@ const Workflows: React.FC = () => {
       return;
     }
 
+    // Check for End Call requirement in Incoming Call workflows
+    const triggerNode = nodesToSave.find((n) => n.type === "trigger");
+    const isIncomingCallWorkflow = triggerNode?.label === "Incoming Call";
+
+    if (isIncomingCallWorkflow) {
+      const hasEndCallNode = nodesToSave.some((n) => n.label === "End Call");
+      if (!hasEndCallNode) {
+        setAlertModal({
+          isOpen: true,
+          title: "Missing End Call Node",
+          message:
+            "Incoming Call workflows must include an 'End Call' node to properly terminate the call. Please add an 'End Call' node to your workflow.",
+          type: "error",
+        });
+        return;
+      }
+    }
+
     if (saveStateResetTimeoutRef.current) {
       clearTimeout(saveStateResetTimeoutRef.current);
       saveStateResetTimeoutRef.current = null;
@@ -1664,7 +1847,6 @@ const Workflows: React.FC = () => {
     setWorkflowSaveState("saving");
 
     // Infer trigger type from the canvas
-    const triggerNode = nodesToSave.find((n) => n.type === "trigger");
     const triggerType = triggerNode ? triggerNode.label : "Manual";
 
     console.log(
@@ -2825,7 +3007,7 @@ const Workflows: React.FC = () => {
                   className="absolute inset-0 bg-black/50 md:hidden"
                   onClick={() => setActiveWorkflowConfigPanel(null)}
                 />
-                <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-auto md:w-80 md:max-w-none">
+                <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-full md:w-80 md:max-w-none">
                   <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                       <Settings2 size={14} /> Workflow Configuration
@@ -3073,85 +3255,79 @@ const Workflows: React.FC = () => {
                       </div>
                     )}
 
-                    {activeWorkflowConfigPanel === "phoneVoice" && (
+                    {activeWorkflowConfigPanel === "agentAssignment" && (
                       <div>
                         <div className="flex items-center gap-3 mb-4">
-                          <div className="p-2 bg-blue-50 rounded-lg">
-                            <Phone size={18} className="text-blue-700" />
+                          <div className="p-2 bg-indigo-50 rounded-lg">
+                            <UserCheck size={18} className="text-indigo-700" />
                           </div>
                           <div>
                             <div className="text-sm font-bold text-slate-800">
-                              Phone Voice
+                              Agent Assignment
                             </div>
                             <div className="text-xs text-slate-400">
-                              Workflow-level voice preference for calls
+                              Assign agent with working hours for scheduling
                             </div>
                           </div>
                         </div>
 
                         <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                          Voice Override
+                          Assigned Agent
                         </label>
 
-                        {workflowResources.phoneVoiceId && (
-                          <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        {workflowResources.assignedAgent && (
+                          <div className="mb-3 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
-                                <Phone size={14} className="text-blue-600" />
+                                <UserCheck
+                                  size={14}
+                                  className="text-indigo-600"
+                                />
                                 <span className="text-sm font-medium text-slate-700">
-                                  {String(workflowResources.phoneVoiceId)}
+                                  {workflowResources.assignedAgent.name ||
+                                    "Agent"}
                                 </span>
                               </div>
                               <button
-                                onClick={clearWorkflowPhoneVoice}
+                                onClick={removeAgent}
                                 className="text-slate-400 hover:text-red-600"
                                 type="button"
                               >
                                 <X size={14} />
                               </button>
                             </div>
-                            {workflowResources.phoneVoiceLanguage && (
-                              <p className="text-[10px] text-slate-500 mt-1">
-                                Language:{" "}
-                                {String(workflowResources.phoneVoiceLanguage)}
-                              </p>
+                            {workflowResources.assignedAgent.agentTimeZone && (
+                              <div className="mt-2 text-xs text-slate-600">
+                                <Clock size={12} className="inline mr-1" />
+                                {workflowResources.assignedAgent.agentTimeZone}
+                              </div>
                             )}
                           </div>
                         )}
 
                         <select
-                          value={workflowResources.phoneVoiceId || ""}
+                          value={workflowResources.assignedAgent?.id || ""}
                           onChange={(e) => {
-                            const voiceId = e.target.value;
-                            if (!voiceId) {
-                              clearWorkflowPhoneVoice();
-                              return;
-                            }
-                            const voiceInfo = availablePhoneVoices.find(
-                              (v) => v.id === voiceId
-                            );
-                            setWorkflowPhoneVoice(
-                              voiceId,
-                              voiceInfo?.language ? voiceInfo.language : ""
-                            );
+                            const agentId = e.target.value || null;
+                            assignAgent(agentId);
                           }}
                           className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                         >
                           <option value="">
-                            Use system-wide phone voice settings
+                            Any Agent (use business hours)
                           </option>
-                          {availablePhoneVoices.map((voice) => (
-                            <option key={voice.id} value={voice.id}>
-                              {voice.name || voice.id}
-                              {voice.language ? ` (${voice.language})` : ""}
+                          {availableAgents.map((agent) => (
+                            <option key={agent.id} value={agent.id}>
+                              {agent.name || agent.email}
                             </option>
                           ))}
                         </select>
 
                         <p className="text-[10px] text-slate-400 mt-1">
-                          If set, this overrides Settings → Phone Voice for this
-                          workflow. The Incoming Call trigger can still override
-                          voice per entry point.
+                          When an agent is assigned, their working hours and
+                          timezone will be used for appointment scheduling. If
+                          "Any Agent" is selected, organization business hours
+                          will be used.
                         </p>
                       </div>
                     )}
@@ -3161,12 +3337,31 @@ const Workflows: React.FC = () => {
             )}
 
             {selectedNode && !selectedEdgeId && (
-              <div className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:w-80 md:shrink-0">
+              <div
+                className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:shrink-0"
+                style={{
+                  width:
+                    window.innerWidth >= 768 ? `${sidebarWidth}px` : undefined,
+                }}
+              >
                 <div
                   className="absolute inset-0 bg-black/50 md:hidden"
                   onClick={() => setSelectedNodeId(null)}
                 />
-                <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-auto md:w-80 md:max-w-none">
+                <div
+                  className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-full md:max-w-none"
+                  style={{
+                    width: window.innerWidth >= 768 ? "100%" : undefined,
+                  }}
+                >
+                  {/* Resize Handle */}
+                  <div
+                    className="hidden md:block absolute left-0 top-0 bottom-0 w-1.5 -ml-1 cursor-ew-resize bg-slate-300 hover:bg-blue-500 active:bg-blue-600 transition-colors group"
+                    onMouseDown={handleResizeStart}
+                    style={{ zIndex: 50 }}
+                  >
+                    <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-slate-400 group-hover:bg-blue-600" />
+                  </div>
                   <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                       <Settings2 size={14} /> Node Properties
@@ -3340,9 +3535,8 @@ const Workflows: React.FC = () => {
                           </select>
                           <p className="text-[10px] text-slate-400 mt-1">
                             If set, this overrides the system-wide Phone Voice
-                            Settings (and any workflow-level Phone Voice
-                            override) for calls that enter via this Incoming
-                            Call trigger.
+                            Settings for calls that enter via this Incoming Call
+                            trigger.
                           </p>
                           {selectedNode.config?.phoneVoiceId && (
                             <p className="text-[10px] text-slate-500 mt-1">
@@ -3474,6 +3668,313 @@ const Workflows: React.FC = () => {
                             known. Name is requested by default for unknown
                             callers.
                           </p>
+                        </div>
+                      </div>
+                    )}
+                    {/* Specific Configuration: Call Group */}
+                    {selectedNode.label === "Call Group" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Call Group
+                          </label>
+                          <select
+                            value={selectedNode.config?.callGroupId || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  callGroupId: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          >
+                            <option value="">Select a call group</option>
+                            {availableCallGroups.map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.name}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Rings members of the selected call group.
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Ring Strategy
+                          </label>
+                          <select
+                            value={
+                              selectedNode.config?.ringStrategy || "SEQUENTIAL"
+                            }
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  ringStrategy: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          >
+                            <option value="SEQUENTIAL">Sequential</option>
+                            <option value="SIMULTANEOUS">Simultaneous</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Ring Timeout (seconds)
+                          </label>
+                          <input
+                            type="number"
+                            min={5}
+                            max={60}
+                            value={selectedNode.config?.timeoutSeconds ?? 20}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  timeoutSeconds: Number(e.target.value),
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.onlyCheckedIn ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    onlyCheckedIn: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Only ring checked-in agents</span>
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.respectWorkingHours ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    respectWorkingHours: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Respect working hours</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Specific Configuration: Call Forwarding */}
+                    {selectedNode.label === "Call Forwarding" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Forward To
+                          </label>
+                          <select
+                            value={
+                              selectedNode.config?.targetType || "external"
+                            }
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  targetType: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          >
+                            <option value="external">External number</option>
+                            <option value="user">User</option>
+                            <option value="callGroup">Call group</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Override Number (optional)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="+15551234567"
+                            value={selectedNode.config?.overrideNumber || ""}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  overrideNumber: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            If set, this number is used regardless of the
+                            selection above.
+                          </p>
+                        </div>
+
+                        {selectedNode.config?.targetType === "external" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              External Number (E.164)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="+15551234567"
+                              value={selectedNode.config?.externalNumber || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    externalNumber: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            />
+                          </div>
+                        )}
+
+                        {selectedNode.config?.targetType === "user" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              User
+                            </label>
+                            <select
+                              value={selectedNode.config?.userId || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    userId: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            >
+                              <option value="">Select a user</option>
+                              {availableAgents.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name} ({u.email})
+                                </option>
+                              ))}
+                            </select>
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Uses the user's forwarding phone number.
+                            </p>
+                          </div>
+                        )}
+
+                        {selectedNode.config?.targetType === "callGroup" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Call Group
+                            </label>
+                            <select
+                              value={selectedNode.config?.callGroupId || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    callGroupId: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            >
+                              <option value="">Select a call group</option>
+                              {availableCallGroups.map((g) => (
+                                <option key={g.id} value={g.id}>
+                                  {g.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Ring Timeout (seconds)
+                          </label>
+                          <input
+                            type="number"
+                            min={5}
+                            max={60}
+                            value={selectedNode.config?.timeoutSeconds ?? 20}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  timeoutSeconds: Number(e.target.value),
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.onlyCheckedIn ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    onlyCheckedIn: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Only ring checked-in agents</span>
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.respectWorkingHours ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    respectWorkingHours: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Respect working hours</span>
+                          </label>
                         </div>
                       </div>
                     )}
@@ -3929,90 +4430,306 @@ const Workflows: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Google Calendar: Create Event */}
+                    {/* Calendar: Create Event (ICS invite) */}
                     {selectedNode.label === "Create Calendar Event" && (
                       <div className="pt-6 border-t border-slate-100 space-y-4">
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                            Event Title
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="Meeting with customer"
-                            value={selectedNode.config?.summary || ""}
-                            onChange={(e) =>
-                              updateNode(selectedNode.id, {
-                                config: {
-                                  ...selectedNode.config,
-                                  summary: e.target.value,
-                                },
-                              })
-                            }
-                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                              Start Time
-                            </label>
-                            <input
-                              type="datetime-local"
-                              value={selectedNode.config?.startTime || ""}
-                              onChange={(e) =>
-                                updateNode(selectedNode.id, {
-                                  config: {
-                                    ...selectedNode.config,
-                                    startTime: e.target.value,
-                                  },
-                                })
-                              }
-                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                              End Time
-                            </label>
-                            <input
-                              type="datetime-local"
-                              value={selectedNode.config?.endTime || ""}
-                              onChange={(e) =>
-                                updateNode(selectedNode.id, {
-                                  config: {
-                                    ...selectedNode.config,
-                                    endTime: e.target.value,
-                                  },
-                                })
-                              }
-                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                            />
-                          </div>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                            Attendees
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="email1@example.com, email2@example.com"
-                            value={selectedNode.config?.attendees || ""}
-                            onChange={(e) =>
-                              updateNode(selectedNode.id, {
-                                config: {
-                                  ...selectedNode.config,
-                                  attendees: e.target.value,
-                                },
-                              })
-                            }
-                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          />
-                        </div>
+                        {(() => {
+                          const conferenceLabel = (t: string) => {
+                            const type = String(t || "").trim();
+                            if (!type) return "";
+                            if (type === "hangoutsMeet") return "Google Meet";
+                            if (type === "addOn")
+                              return "Google Workspace Add-on";
+                            if (type === "eventHangout")
+                              return "Hangouts (legacy)";
+                            if (type === "eventNamedHangout")
+                              return "Hangouts (named, legacy)";
+                            return type;
+                          };
+
+                          const allowedTypes =
+                            calendarConferenceStatus.state === "loaded" &&
+                            calendarConferenceStatus.connected
+                              ? calendarConferenceStatus.allowedTypes || []
+                              : [];
+
+                          const addMeeting = Boolean(
+                            selectedNode.config?.addMeeting ?? false
+                          );
+
+                          const selectedProvider = String(
+                            selectedNode.config?.meetingProvider || ""
+                          ).trim();
+
+                          return (
+                            <>
+                              <div className="text-xs text-slate-500">
+                                Sends an email with an{" "}
+                                <span className="font-semibold">.ics</span>{" "}
+                                invite attachment (works with Google Calendar,
+                                Outlook, Apple Calendar).
+                              </div>
+
+                              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                <div className="text-[11px] text-slate-600">
+                                  {calendarConferenceStatus.state ===
+                                    "loading" &&
+                                    "Checking connected Google Calendar…"}
+                                  {calendarConferenceStatus.state ===
+                                    "loaded" &&
+                                    calendarConferenceStatus.connected &&
+                                    (allowedTypes.length > 0
+                                      ? "Meeting providers detected on this Google Calendar account."
+                                      : "Google Calendar connected, but no conference providers were reported by the API.")}
+                                  {calendarConferenceStatus.state ===
+                                    "loaded" &&
+                                    !calendarConferenceStatus.connected &&
+                                    "Google Calendar is not connected for this tenant."}
+                                  {calendarConferenceStatus.state === "error" &&
+                                    "Unable to check meeting providers."}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="flex items-start gap-3">
+                                  <input
+                                    type="checkbox"
+                                    checked={addMeeting}
+                                    onChange={(e) => {
+                                      const next = e.target.checked;
+                                      const nextProvider =
+                                        next && !selectedProvider
+                                          ? allowedTypes[0] || "hangoutsMeet"
+                                          : selectedProvider;
+
+                                      updateNode(selectedNode.id, {
+                                        config: {
+                                          ...selectedNode.config,
+                                          addMeeting: next,
+                                          meetingProvider: next
+                                            ? nextProvider
+                                            : undefined,
+                                        },
+                                      });
+                                    }}
+                                    disabled={
+                                      calendarConferenceStatus.state ===
+                                      "loading"
+                                    }
+                                  />
+                                  <span>
+                                    <span className="block text-sm text-slate-700 font-medium">
+                                      Add meeting link (Google Calendar)
+                                    </span>
+                                    <span className="block text-xs text-slate-500">
+                                      When enabled and Google Calendar is
+                                      connected, the created event will include
+                                      a conferencing link.
+                                    </span>
+                                  </span>
+                                </label>
+                              </div>
+
+                              {addMeeting && (
+                                <div>
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                    Meeting Provider
+                                  </label>
+                                  <select
+                                    value={selectedProvider || ""}
+                                    onChange={(e) =>
+                                      updateNode(selectedNode.id, {
+                                        config: {
+                                          ...selectedNode.config,
+                                          meetingProvider: e.target.value,
+                                        },
+                                      })
+                                    }
+                                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                    disabled={
+                                      !(
+                                        calendarConferenceStatus.state ===
+                                          "loaded" &&
+                                        calendarConferenceStatus.connected
+                                      )
+                                    }
+                                  >
+                                    {(allowedTypes.length > 0
+                                      ? allowedTypes
+                                      : ["hangoutsMeet"]
+                                    ).map((t) => (
+                                      <option key={t} value={t}>
+                                        {conferenceLabel(t)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <p className="text-[10px] text-slate-400 mt-1">
+                                    This list comes from the connected Google
+                                    Calendar account.
+                                  </p>
+                                </div>
+                              )}
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Event Title
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Meeting with customer"
+                                  value={selectedNode.config?.summary || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        summary: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+
+                              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                <div className="text-[11px] text-slate-600">
+                                  Start/end times come from the scheduling flow
+                                  (chat/call). This node only creates the
+                                  calendar event + invite.
+                                  {tenantMaxMeetingDuration > 0 && (
+                                    <>
+                                      <br />
+                                      <br />
+                                      <span className="font-semibold">
+                                        Max meeting duration:
+                                      </span>{" "}
+                                      {tenantMaxMeetingDuration} minutes
+                                      (configured in Settings → Business Hours)
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Location (Optional)
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Zoom / Office / Address"
+                                  value={selectedNode.config?.location || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        location: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Description (Optional)
+                                </label>
+                                <textarea
+                                  rows={3}
+                                  placeholder="Agenda, prep notes, meeting link..."
+                                  value={selectedNode.config?.description || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        description: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Attendees
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="email1@example.com, email2@example.com"
+                                  value={selectedNode.config?.attendees || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        attendees: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  Comma-separated emails. If empty, falls back
+                                  to the customer email (if available).
+                                </p>
+                              </div>
+
+                              <div className="pt-2 border-t border-slate-100 space-y-3">
+                                <div>
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                    Email Subject (Optional)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    placeholder="Invitation: Meeting"
+                                    value={
+                                      selectedNode.config?.emailSubject || ""
+                                    }
+                                    onChange={(e) =>
+                                      updateNode(selectedNode.id, {
+                                        config: {
+                                          ...selectedNode.config,
+                                          emailSubject: e.target.value,
+                                        },
+                                      })
+                                    }
+                                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                    Email Body (Optional)
+                                  </label>
+                                  <textarea
+                                    rows={3}
+                                    placeholder="Hi! Here's a calendar invite for our meeting..."
+                                    value={selectedNode.config?.emailBody || ""}
+                                    onChange={(e) =>
+                                      updateNode(selectedNode.id, {
+                                        config: {
+                                          ...selectedNode.config,
+                                          emailBody: e.target.value,
+                                        },
+                                      })
+                                    }
+                                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                  />
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
 
                     {selectedNode.label === "Send Gmail" && (
                       <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div className="text-[11px] text-slate-500">
+                          {gmailSenderStatus.state === "loading" &&
+                            "Checking connected Gmail account…"}
+                          {gmailSenderStatus.state === "loaded" &&
+                            `Sending as: ${gmailSenderStatus.email}`}
+                          {gmailSenderStatus.state === "error" &&
+                            "Gmail not connected (or unable to fetch sender)."}
+                        </div>
                         <div>
                           <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                             To
@@ -4118,13 +4835,29 @@ const Workflows: React.FC = () => {
 
                     {selectedNode.label === "Add Row to Sheet" && (
                       <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div className="text-xs text-slate-500 mb-3">
+                          Export data to Google Sheets. Supports{" "}
+                          <span className="font-semibold">variables</span> like{" "}
+                          <code className="px-1 bg-slate-100 rounded">
+                            {"{{customer.name}}"}
+                          </code>
+                          ,{" "}
+                          <code className="px-1 bg-slate-100 rounded">
+                            {"{{customer.email}}"}
+                          </code>
+                          ,{" "}
+                          <code className="px-1 bg-slate-100 rounded">
+                            {"{{trigger.message}}"}
+                          </code>
+                        </div>
+
                         <div>
                           <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                             Spreadsheet ID
                           </label>
                           <input
                             type="text"
-                            placeholder="From spreadsheet URL"
+                            placeholder="From spreadsheet URL: docs.google.com/spreadsheets/d/SPREADSHEET_ID/..."
                             value={selectedNode.config?.spreadsheetId || ""}
                             onChange={(e) =>
                               updateNode(selectedNode.id, {
@@ -4136,7 +4869,11 @@ const Workflows: React.FC = () => {
                             }
                             className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                           />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Copy from the URL between /d/ and /edit
+                          </p>
                         </div>
+
                         <div>
                           <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                             Sheet Name
@@ -4156,13 +4893,14 @@ const Workflows: React.FC = () => {
                             className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                           />
                         </div>
+
                         <div>
                           <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                             Row Values (Comma-Separated)
                           </label>
-                          <input
-                            type="text"
-                            placeholder="value1, value2, value3"
+                          <textarea
+                            rows={3}
+                            placeholder={`{{customer.name}}, {{customer.email}}, {{customer.phone}}, {{trigger.message}}, {{workflow.timestamp}}`}
                             value={selectedNode.config?.valuesString || ""}
                             onChange={(e) =>
                               updateNode(selectedNode.id, {
@@ -4175,9 +4913,120 @@ const Workflows: React.FC = () => {
                                 },
                               })
                             }
-                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
                           />
+                          <p className="text-[10px] text-slate-400 mt-1">
+                            Use variables or plain text. Order matches your
+                            spreadsheet columns.
+                          </p>
                         </div>
+
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                          <label className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={selectedNode.config?.saveAsLead || false}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    saveAsLead: e.target.checked,
+                                  },
+                                })
+                              }
+                            />
+                            <span>
+                              <span className="block text-sm text-indigo-800 font-medium">
+                                Save as Lead Capture
+                              </span>
+                              <span className="block text-xs text-indigo-600">
+                                Also save this data to the internal leads
+                                database for tracking and follow-up.
+                              </span>
+                            </span>
+                          </label>
+                        </div>
+
+                        {selectedNode.config?.saveAsLead && (
+                          <div className="space-y-3 border-l-2 border-indigo-300 pl-4">
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                Lead Name (Variable)
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="{{customer.name}}"
+                                value={selectedNode.config?.leadName || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      leadName: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                Lead Email (Variable)
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="{{customer.email}}"
+                                value={selectedNode.config?.leadEmail || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      leadEmail: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                Lead Phone (Variable)
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="{{customer.phone}}"
+                                value={selectedNode.config?.leadPhone || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      leadPhone: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">
+                                Notes (Optional)
+                              </label>
+                              <textarea
+                                rows={2}
+                                placeholder="{{trigger.message}} or custom notes"
+                                value={selectedNode.config?.leadNotes || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      leadNotes: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm resize-none"
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -4261,7 +5110,7 @@ const Workflows: React.FC = () => {
                       className="absolute inset-0 bg-black/50 md:hidden"
                       onClick={() => setSelectedEdgeId(null)}
                     />
-                    <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 overflow-y-auto shadow-xl md:static md:h-auto md:w-80 md:max-w-none">
+                    <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 overflow-y-auto shadow-xl md:static md:h-full md:w-80 md:max-w-none">
                       <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between md:hidden">
                         <div className="flex items-center gap-2">
                           <GitBranch size={16} className="text-slate-600" />
@@ -4298,45 +5147,34 @@ const Workflows: React.FC = () => {
                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                               Edge Label
                             </label>
-                            <input
-                              type="text"
-                              value={selectedEdge.label || ""}
-                              onChange={(e) =>
-                                updateEdge(selectedEdgeId, {
-                                  label: e.target.value || undefined,
-                                })
-                              }
-                              placeholder="Optional label..."
-                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                            />
-                            {sourceNode?.label === "Condition" && (
-                              <div className="mt-2">
-                                <p className="text-[10px] text-slate-500 mb-2">
-                                  Quick labels for conditions:
-                                </p>
-                                <div className="flex gap-2">
-                                  <button
-                                    onClick={() =>
-                                      updateEdge(selectedEdgeId, {
-                                        label: "yes",
-                                      })
-                                    }
-                                    className="flex-1 px-2 py-1 bg-green-100 text-green-700 rounded text-xs font-bold hover:bg-green-200 transition-colors"
-                                  >
-                                    Yes
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      updateEdge(selectedEdgeId, {
-                                        label: "no",
-                                      })
-                                    }
-                                    className="flex-1 px-2 py-1 bg-red-100 text-red-700 rounded text-xs font-bold hover:bg-red-200 transition-colors"
-                                  >
-                                    No
-                                  </button>
-                                </div>
-                              </div>
+                            {sourceNode?.label === "Condition" ? (
+                              <select
+                                value={(selectedEdge.label || "").toLowerCase()}
+                                onChange={(e) =>
+                                  updateEdge(selectedEdgeId, {
+                                    label: e.target.value
+                                      ? e.target.value
+                                      : undefined,
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              >
+                                <option value="">(unset)</option>
+                                <option value="yes">yes</option>
+                                <option value="no">no</option>
+                              </select>
+                            ) : (
+                              <input
+                                type="text"
+                                value={selectedEdge.label || ""}
+                                onChange={(e) =>
+                                  updateEdge(selectedEdgeId, {
+                                    label: e.target.value || undefined,
+                                  })
+                                }
+                                placeholder="Optional label..."
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
                             )}
                             <p className="text-[10px] text-slate-400 mt-1">
                               {sourceNode?.label === "Condition"

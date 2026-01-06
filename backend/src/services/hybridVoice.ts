@@ -258,16 +258,6 @@ class HybridVoiceService {
             ? triggerNode.config.greeting
             : "";
 
-        const workflowPhoneVoiceId =
-          typeof (workflow as any)?.phoneVoiceId === "string"
-            ? (workflow as any).phoneVoiceId
-            : "";
-        const workflowPhoneVoiceLanguage =
-          typeof (workflow as any)?.phoneVoiceLanguage === "string"
-            ? (workflow as any).phoneVoiceLanguage
-            : "";
-
-        // Optional per-workflow phone voice override (overrides tenant-level preference)
         const triggerPhoneVoiceId =
           typeof triggerNode?.config?.phoneVoiceId === "string"
             ? triggerNode.config.phoneVoiceId
@@ -277,12 +267,7 @@ class HybridVoiceService {
             ? triggerNode.config.phoneVoiceLanguage
             : "";
 
-        // Precedence: tenant default -> workflow override -> trigger override
-        applyPhoneVoiceOverride(
-          workflowPhoneVoiceId,
-          workflowPhoneVoiceLanguage,
-          "workflow"
-        );
+        // Precedence: tenant default -> Incoming Call trigger override
         applyPhoneVoiceOverride(
           triggerPhoneVoiceId,
           triggerPhoneVoiceLanguage,

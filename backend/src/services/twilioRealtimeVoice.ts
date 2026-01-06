@@ -2,6 +2,11 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { TwilioService } from "./twilio";
 import { variableResolver } from "./variableResolver";
+import { DateTime } from "luxon";
+import prisma from "../lib/prisma";
+import { buildIcsInvite } from "./calendarInvite";
+import { EmailService } from "./email";
+import { GoogleCalendarService } from "./integrations/google/calendar";
 
 const END_CALL_MARKER = "[[END_CALL]]";
 
@@ -23,6 +28,199 @@ function normalizeGreeting(raw: string, agentName?: string): string {
   // Apply a generous cap to avoid extreme payloads.
   const maxChars = 2000;
   return base.length > maxChars ? base.slice(0, maxChars).trim() : base;
+}
+
+function isValidEmail(email: string): boolean {
+  const e = (email || "").trim().toLowerCase();
+  if (!e) return false;
+  // Conservative but practical.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+
+function normalizeEmailFromSpoken(spoken: string): {
+  success: boolean;
+  email?: string;
+  confidence: number;
+  message: string;
+} {
+  const raw = String(spoken || "").trim();
+  if (!raw) {
+    return {
+      success: false,
+      confidence: 0,
+      message: "No email input provided",
+    };
+  }
+
+  const nato: Record<string, string> = {
+    alpha: "a",
+    bravo: "b",
+    charlie: "c",
+    delta: "d",
+    echo: "e",
+    foxtrot: "f",
+    golf: "g",
+    hotel: "h",
+    india: "i",
+    juliett: "j",
+    juliet: "j",
+    kilo: "k",
+    lima: "l",
+    mike: "m",
+    november: "n",
+    oscar: "o",
+    papa: "p",
+    quebec: "q",
+    romeo: "r",
+    sierra: "s",
+    tango: "t",
+    uniform: "u",
+    victor: "v",
+    whiskey: "w",
+    whisky: "w",
+    xray: "x",
+    "x-ray": "x",
+    yankee: "y",
+    zulu: "z",
+  };
+
+  const tokens = raw
+    .toLowerCase()
+    .replace(/[,;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t0 = tokens[i];
+    const t = t0.replace(/^[\"'()\[]+|[\"'()\]]+$/g, "");
+    if (!t) continue;
+
+    // Handle patterns like "s for sugar" or "t for tommy" -> take the letter
+    if (/^[a-z]$/.test(t) && tokens[i + 1] === "for") {
+      out.push(t);
+      i += 2; // skip "for" and the following word
+      continue;
+    }
+
+    // Handle patterns like "s4sugar" or "t4tommy" -> take leading letter
+    const s4 = t.match(/^([a-z])\d/);
+    if (s4) {
+      out.push(s4[1]);
+      continue;
+    }
+
+    if (t === "at" || t === "@") {
+      out.push("@");
+      continue;
+    }
+    if (t === "dot" || t === ".") {
+      out.push(".");
+      continue;
+    }
+    if (t === "underscore") {
+      out.push("_");
+      continue;
+    }
+    if (t === "dash" || t === "hyphen") {
+      out.push("-");
+      continue;
+    }
+    if (t === "plus") {
+      out.push("+");
+      continue;
+    }
+
+    // Handle things like "t.d.a." or "f-y" passed through
+    const stripped = t.replace(/[^a-z0-9@._+\-]/g, "");
+    if (stripped.includes("@") || stripped.includes(".")) {
+      out.push(stripped);
+      continue;
+    }
+
+    // NATO phonetics and single-letter spelling
+    if (nato[stripped]) {
+      out.push(nato[stripped]);
+      continue;
+    }
+    if (/^[a-z]$/.test(stripped)) {
+      out.push(stripped);
+      continue;
+    }
+
+    // Common domain shortcuts
+    if (stripped === "gmail") {
+      out.push("gmail");
+      continue;
+    }
+    if (stripped === "yahoo") {
+      out.push("yahoo");
+      continue;
+    }
+
+    // Otherwise append literal token
+    out.push(stripped);
+  }
+
+  const joined = out
+    .join("")
+    .replace(/\.+/g, ".")
+    .replace(/@+/g, "@")
+    .replace(/\s+/g, "")
+    .trim();
+
+  // Try to repair missing punctuation in common endings
+  let candidate = joined;
+  candidate = candidate
+    .replace(/\(at\)/g, "@")
+    .replace(/\(dot\)/g, ".")
+    .replace(/\.(com|net|org)\b/g, ".$1");
+
+  const email = candidate;
+  if (!isValidEmail(email)) {
+    return {
+      success: false,
+      confidence: 0.25,
+      message:
+        "Could not confidently parse a valid email. Ask the caller to spell it letter-by-letter (or using phonetics like Alpha/Bravo), including 'at' and 'dot'.",
+    };
+  }
+
+  // Basic confidence heuristic: higher if original already looked like an email.
+  const confidence = raw.includes("@") ? 0.9 : 0.7;
+  return {
+    success: true,
+    email,
+    confidence,
+    message: "Parsed email from spelling",
+  };
+}
+
+function transcriptIsAffirmative(transcript: string): boolean {
+  const t = (transcript || "").trim().toLowerCase();
+  if (!t) return false;
+  // Keep conservative.
+  return (
+    t === "yes" ||
+    t === "yes." ||
+    t === "correct" ||
+    t === "correct." ||
+    t.includes("that's correct") ||
+    t.includes("that is correct") ||
+    t.includes("yes i am") ||
+    t.includes("that's me") ||
+    t.includes("that is me")
+  );
+}
+
+function transcriptIsNegative(transcript: string): boolean {
+  const t = (transcript || "").trim().toLowerCase();
+  if (!t) return false;
+  return (
+    t === "no" || t === "no." || t.includes("not me") || t.includes("wrong")
+  );
 }
 
 interface TwilioRealtimeSession {
@@ -61,11 +259,513 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
   private sessions: Map<string, TwilioRealtimeSession> = new Map();
   private apiKey: string;
   private twilioService: TwilioService;
+  private emailService: EmailService;
+  private googleCalendar: GoogleCalendarService;
+  private loggingService: any; // Will be imported
 
   constructor() {
     super();
     this.apiKey = process.env.OPENAI_API_KEY || "";
     this.twilioService = new TwilioService();
+    this.emailService = new EmailService();
+    this.googleCalendar = new GoogleCalendarService();
+    // Dynamic import to avoid circular dependency
+    import("./loggingService").then((module) => {
+      this.loggingService = module.loggingService;
+    });
+  }
+
+  private getDefaultTimeZone(session: TwilioRealtimeSession): string {
+    const explicit =
+      String(session.workflowContext?.customer?.timeZone ?? "").trim() ||
+      String(session.workflowContext?.tenant?.timeZone ?? "").trim();
+    if (explicit) return explicit;
+
+    const callerCountry = String(session.workflowContext?.call?.callerCountry)
+      .trim()
+      .toUpperCase();
+    const callerState = String(session.workflowContext?.call?.callerState)
+      .trim()
+      .toUpperCase();
+
+    if (callerCountry === "US" && callerState) {
+      const eastern = new Set([
+        "CT",
+        "DE",
+        "FL",
+        "GA",
+        "IN",
+        "KY",
+        "MA",
+        "MD",
+        "ME",
+        "MI",
+        "NC",
+        "NH",
+        "NJ",
+        "NY",
+        "OH",
+        "PA",
+        "RI",
+        "SC",
+        "TN",
+        "VA",
+        "VT",
+        "WV",
+        "DC",
+      ]);
+      const central = new Set([
+        "AL",
+        "AR",
+        "IA",
+        "IL",
+        "KS",
+        "LA",
+        "MN",
+        "MO",
+        "MS",
+        "ND",
+        "NE",
+        "OK",
+        "SD",
+        "TX",
+        "WI",
+      ]);
+      const mountain = new Set(["AZ", "CO", "ID", "MT", "NM", "UT", "WY"]);
+      const pacific = new Set(["CA", "NV", "OR", "WA"]);
+      const alaska = new Set(["AK"]);
+      const hawaii = new Set(["HI"]);
+
+      if (eastern.has(callerState)) return "America/New_York";
+      if (central.has(callerState)) return "America/Chicago";
+      if (mountain.has(callerState)) return "America/Denver";
+      if (pacific.has(callerState)) return "America/Los_Angeles";
+      if (alaska.has(callerState)) return "America/Anchorage";
+      if (hawaii.has(callerState)) return "Pacific/Honolulu";
+    }
+
+    return "America/New_York";
+  }
+
+  /**
+   * Check if a time range falls within working hours
+   */
+  private checkWithinWorkingHours(
+    start: DateTime,
+    end: DateTime,
+    workingHours: Record<string, { start: string; end: string } | null>,
+    workingHoursTimeZone: string
+  ): boolean {
+    // Convert start/end to the working hours timezone
+    const startInZone = start.setZone(workingHoursTimeZone);
+    const endInZone = end.setZone(workingHoursTimeZone);
+
+    // Get day of week (lowercase: monday, tuesday, etc.)
+    const dayOfWeek = startInZone.weekdayLong?.toLowerCase();
+    if (!dayOfWeek) return false;
+
+    // Get working hours for this day
+    const dayHours = workingHours[dayOfWeek];
+    if (!dayHours || !dayHours.start || !dayHours.end) {
+      // Day is not configured or marked as closed
+      return false;
+    }
+
+    // Parse working hours times (format: "HH:mm")
+    const [startHour, startMin] = dayHours.start.split(":").map(Number);
+    const [endHour, endMin] = dayHours.end.split(":").map(Number);
+
+    const workStart = startInZone.set({
+      hour: startHour,
+      minute: startMin,
+      second: 0,
+    });
+    const workEnd = startInZone.set({
+      hour: endHour,
+      minute: endMin,
+      second: 0,
+    });
+
+    // Check if appointment is within working hours
+    return startInZone >= workStart && endInZone <= workEnd;
+  }
+
+  private async bookAppointment(
+    session: TwilioRealtimeSession,
+    input: {
+      startTime: string;
+      timeZone?: string;
+      durationMinutes?: number;
+      summary?: string;
+      description?: string;
+      location?: string;
+      attendeeEmail?: string;
+      requireCalendarEvent?: boolean;
+      emailConfirmed?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    message: string;
+    attendeeEmail?: string;
+    startTime?: string;
+    endTime?: string;
+    calendarEventId?: string;
+    calendarEventHtmlLink?: string;
+    calendarMeetLink?: string;
+    calendarEventCreated?: boolean;
+    calendarAvailabilityChecked?: boolean;
+    calendarIsFree?: boolean;
+    suggestions?: Array<{ startTime: string; endTime: string }>;
+  }> {
+    // Determine timezone: use agent timezone if assigned, otherwise use input or default
+    const assignedAgent = session.workflowContext?.workflow?.assignedAgent;
+    const timeZone =
+      assignedAgent?.agentTimeZone ||
+      String(input.timeZone || "").trim() ||
+      this.getDefaultTimeZone(session);
+
+    const tenantPrefs: any = await (prisma as any).tenant.findUnique({
+      where: { id: session.tenantId },
+      select: {
+        maxMeetingDurationMinutes: true,
+        calendarAutoAddMeet: true,
+        businessHours: true,
+        businessTimeZone: true,
+      },
+    });
+
+    const maxDurationMinutes = Math.min(
+      8 * 60,
+      Math.max(5, tenantPrefs?.maxMeetingDurationMinutes ?? 60)
+    );
+
+    const requestedDuration =
+      typeof input.durationMinutes === "number" && input.durationMinutes > 0
+        ? Math.floor(input.durationMinutes)
+        : undefined;
+
+    if (requestedDuration && requestedDuration > maxDurationMinutes) {
+      return {
+        success: false,
+        message: `The maximum appointment length is ${maxDurationMinutes} minutes. Please choose a shorter duration.`,
+      };
+    }
+
+    const durationMinutes = requestedDuration
+      ? Math.min(maxDurationMinutes, requestedDuration)
+      : Math.min(maxDurationMinutes, 30);
+
+    const attendeeEmail = String(
+      input.attendeeEmail || session.workflowContext?.customer?.email || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!attendeeEmail) {
+      return {
+        success: false,
+        message: "Missing attendee email address",
+      };
+    }
+
+    if (!isValidEmail(attendeeEmail)) {
+      return {
+        success: false,
+        message:
+          "That email address doesn't look valid. Please spell it letter by letter (or using phonetics like Alpha/Bravo), including 'at' and 'dot'.",
+      };
+    }
+
+    const requireCalendarEvent =
+      typeof input.requireCalendarEvent === "boolean"
+        ? input.requireCalendarEvent
+        : true;
+
+    const emailConfirmed =
+      Boolean(input.emailConfirmed) ||
+      Boolean(session.workflowContext?.emailConfirmed === true);
+
+    if (!emailConfirmed) {
+      return {
+        success: false,
+        message:
+          "Please confirm the email address is correct before booking. Read it back and ask for a yes/no confirmation.",
+        attendeeEmail,
+      };
+    }
+
+    const startRaw = String(input.startTime || "").trim();
+    if (!startRaw) {
+      return { success: false, message: "Missing start time" };
+    }
+
+    const hasExplicitZone = /([zZ]|[+-]\d\d:\d\d)$/.test(startRaw);
+    const parsed = DateTime.fromISO(startRaw);
+    if (!parsed.isValid) {
+      return {
+        success: false,
+        message: "Invalid start time format (expected ISO 8601)",
+      };
+    }
+
+    // Realtime models sometimes supply an ISO string with an arbitrary offset.
+    // Interpret the *local time* the caller requested in the chosen timeZone.
+    const start = hasExplicitZone
+      ? parsed.setZone(timeZone, { keepLocalTime: true })
+      : DateTime.fromISO(startRaw, { zone: timeZone });
+
+    const end = start.plus({ minutes: durationMinutes });
+    const startTime = start.toISO();
+    const endTime = end.toISO();
+    if (!startTime || !endTime) {
+      return {
+        success: false,
+        message: "Failed to compute appointment time range",
+      };
+    }
+
+    // Validate against working hours (agent's if assigned, otherwise tenant's business hours)
+    const workingHours =
+      assignedAgent?.workingHours || tenantPrefs?.businessHours;
+    const workingHoursTimeZone =
+      assignedAgent?.timezone || tenantPrefs?.businessTimeZone || timeZone;
+
+    if (workingHours && typeof workingHours === "object") {
+      const isWithinWorkingHours = this.checkWithinWorkingHours(
+        start,
+        end,
+        workingHours as any,
+        workingHoursTimeZone
+      );
+
+      if (!isWithinWorkingHours) {
+        const scheduleName = assignedAgent
+          ? `${assignedAgent.name}'s schedule`
+          : "business hours";
+        return {
+          success: false,
+          message: `That time is outside ${scheduleName}. Please choose a time during working hours.`,
+        };
+      }
+    }
+
+    const summary =
+      String(input.summary || "Call Appointment").trim() || "Call Appointment";
+    const description = String(input.description || "").trim() || undefined;
+    const location = String(input.location || "").trim() || undefined;
+
+    // Calendar-first: check availability and create Google Calendar event on the connected calendar.
+    let googleEvent: {
+      eventId?: string;
+      htmlLink?: string;
+      meetLink?: string;
+    } | null = null;
+    let calendarAvailabilityChecked = false;
+    let calendarIsFree: boolean | undefined;
+    const suggestions: Array<{ startTime: string; endTime: string }> = [];
+
+    try {
+      // Availability check
+      const availability = await this.googleCalendar.checkAvailability(
+        session.tenantId,
+        startTime,
+        endTime,
+        timeZone
+      );
+
+      calendarAvailabilityChecked = true;
+      calendarIsFree = Boolean(availability?.isFree);
+
+      if (!availability?.isFree) {
+        // Suggest a few alternative 30-min slots by scanning forward.
+        let cursor = start.plus({ minutes: 30 });
+        const maxChecks = 24; // up to 12 hours ahead
+        for (let i = 0; i < maxChecks && suggestions.length < 3; i += 1) {
+          const s = cursor;
+          const e = s.plus({ minutes: durationMinutes });
+          const sIso = s.toISO();
+          const eIso = e.toISO();
+          if (!sIso || !eIso) break;
+
+          try {
+            const a = await this.googleCalendar.checkAvailability(
+              session.tenantId,
+              sIso,
+              eIso,
+              timeZone
+            );
+            if (a?.isFree) {
+              suggestions.push({ startTime: sIso, endTime: eIso });
+            }
+          } catch {
+            // ignore suggestion check errors
+          }
+
+          cursor = cursor.plus({ minutes: 30 });
+        }
+
+        return {
+          success: false,
+          message:
+            "That time is not available on the connected calendar. Please choose a different time.",
+          attendeeEmail,
+          startTime,
+          endTime,
+          calendarEventCreated: false,
+          calendarAvailabilityChecked,
+          calendarIsFree: false,
+          suggestions: suggestions.length ? suggestions : undefined,
+        };
+      }
+
+      const addMeet = tenantPrefs?.calendarAutoAddMeet ?? true;
+
+      const googleResult = await this.googleCalendar.createEvent(
+        session.tenantId,
+        {
+          summary,
+          description,
+          location,
+          startTime,
+          endTime,
+          attendees: [attendeeEmail],
+          timeZone,
+          sendUpdates: "all",
+          addMeet,
+        }
+      );
+
+      if (googleResult?.success) {
+        googleEvent = {
+          eventId: googleResult.eventId ?? undefined,
+          htmlLink: googleResult.htmlLink ?? undefined,
+          meetLink: googleResult.meetLink ?? undefined,
+        };
+      }
+    } catch (error) {
+      const msg =
+        error instanceof Error ? error.message : "Unknown calendar error";
+      console.error(
+        `[TwilioRealtime] Failed to create Google Calendar event (tenant=${session.tenantId}): ${msg}`
+      );
+    }
+
+    if (requireCalendarEvent && !googleEvent?.eventId) {
+      return {
+        success: false,
+        message:
+          "I couldn't add this appointment to the connected Google Calendar (it may not be connected, or the Google Calendar API is disabled). Please connect/enable Google Calendar and try again.",
+        attendeeEmail,
+        startTime,
+        endTime,
+        calendarEventCreated: false,
+        calendarAvailabilityChecked,
+        calendarIsFree,
+      };
+    }
+
+    const effectiveDescription =
+      googleEvent?.meetLink &&
+      !String(description ?? "").includes(String(googleEvent.meetLink))
+        ? [String(description ?? "").trim(), `Join: ${googleEvent.meetLink}`]
+            .filter(Boolean)
+            .join("\n")
+        : description;
+
+    const { uid, ics } = buildIcsInvite({
+      summary,
+      description: effectiveDescription,
+      location,
+      startTime,
+      endTime,
+      timeZone,
+      attendees: [attendeeEmail],
+    });
+
+    const subject = `Appointment Confirmation: ${summary}`;
+    const body = [
+      `Confirmed: ${summary}`,
+      `When: ${start.toLocaleString(DateTime.DATETIME_FULL)}`,
+      location ? `Location: ${location}` : "",
+      googleEvent?.meetLink ? `Join: ${googleEvent.meetLink}` : "",
+      googleEvent?.htmlLink ? `View: ${googleEvent.htmlLink}` : "",
+      "\nThis email includes an .ics calendar invite attachment.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    await this.emailService.sendEmail({
+      to: attendeeEmail,
+      subject,
+      body,
+      isHtml: false,
+      attachments: [
+        {
+          filename: "invite.ics",
+          content: ics,
+          contentType: "text/calendar; charset=utf-8; method=REQUEST",
+        },
+      ],
+    });
+
+    // Store useful outputs in session context for later responses if needed.
+    session.workflowContext = session.workflowContext || {};
+    session.workflowContext.emailConfirmed = true;
+    session.workflowContext.booking = {
+      uid,
+      attendeeEmail,
+      startTime,
+      endTime,
+      timeZone,
+      summary,
+      calendarEventId: googleEvent?.eventId,
+      calendarEventHtmlLink: googleEvent?.htmlLink,
+      calendarMeetLink: googleEvent?.meetLink,
+    };
+
+    // Log appointment to database
+    if (this.loggingService && session.tenantId) {
+      try {
+        await this.loggingService.logAppointment({
+          tenantId: session.tenantId,
+          customerId: session.workflowContext?.customer?.id,
+          customerName: session.workflowContext?.customer?.name,
+          customerEmail: attendeeEmail,
+          customerPhone: session.workflowContext?.call?.from,
+          appointmentTime: start.toJSDate(),
+          durationMinutes: durationMinutes,
+          status: "SCHEDULED",
+          eventId: googleEvent?.eventId,
+          source: "voice",
+          notes: description,
+          metadata: {
+            callSid: session.workflowContext?.call?.callSid,
+            timeZone,
+            meetLink: googleEvent?.meetLink,
+          },
+          conversationId: (session as any).conversationId,
+        });
+      } catch (logError) {
+        console.error("[TwilioRealtime] Failed to log appointment:", logError);
+      }
+    }
+
+    return {
+      success: true,
+      message: googleEvent?.eventId
+        ? "Appointment booked on the connected calendar and confirmation email sent"
+        : "Confirmation email sent (calendar event was not created)",
+      attendeeEmail,
+      startTime,
+      endTime,
+      calendarEventId: googleEvent?.eventId,
+      calendarEventHtmlLink: googleEvent?.htmlLink,
+      calendarMeetLink: googleEvent?.meetLink,
+      calendarEventCreated: Boolean(googleEvent?.eventId),
+      calendarAvailabilityChecked,
+      calendarIsFree,
+      suggestions: suggestions.length ? suggestions : undefined,
+    };
   }
 
   private extractTextFromResponseDone(message: any): string {
@@ -244,7 +944,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.`,
+            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.\n\nIDENTITY CHECK RULES:\n- If our records show a caller name, ask: "Are you <name>?" and wait for yes/no.\n- If the caller confirms, call update_customer_info with that same name to mark it verified.\n- If we do NOT have a name on file, always ask for their full name and save it.\n\nAPPOINTMENT BOOKING RULES:\n- Before calling book_appointment, ALWAYS confirm: date, time, time zone, and email address.\n- ALWAYS read back the email address slowly and ask the caller to confirm yes/no.\n- If the caller spells their email using patterns like "S for Sugar" or phonetics like "Tango", use normalize_email_spelling to reconstruct the email; then read it back and confirm.\n- Only call book_appointment AFTER email confirmation. Include emailConfirmed=true.\n- By default, require a Google Calendar event (requireCalendarEvent=true). If Google Calendar isn't available, ask if email-only is acceptable and only then set requireCalendarEvent=false.\n- If the caller says "tomorrow at 10", ask clarifying questions if date/time zone are ambiguous.\n- Booking must respect the connected Google Calendar schedule; if busy, offer alternatives.\n\nIf the caller asks to book/schedule an appointment or call, follow the rules above and then use the book_appointment function to create the appointment and send a confirmation email (with an .ics invite).`,
             voice: voice, // Options: alloy, echo, shimmer
             input_audio_format: "g711_ulaw", // Twilio uses mulaw
             output_audio_format: "g711_ulaw",
@@ -253,9 +953,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
             },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5, // Lower threshold = more sensitive to speech
-              prefix_padding_ms: 300,
-              silence_duration_ms: 800, // Shorter silence = faster response
+              threshold: 0.6, // Higher threshold = less sensitive to background noise
+              prefix_padding_ms: 500, // Longer padding helps distinguish speech from noise
+              silence_duration_ms: 1000, // Longer silence = more stable detection
               // We explicitly create responses after speech_stopped,
               // so the assistant reliably waits for the caller.
               create_response: false,
@@ -292,6 +992,78 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                     },
                   },
                   required: [],
+                },
+              },
+              {
+                type: "function",
+                name: "normalize_email_spelling",
+                description:
+                  "Normalize an email address from spoken/spelled input like 'T D A at yahoo dot com' or phonetics like 'Tango Delta Alpha at yahoo dot com'.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    spoken: {
+                      type: "string",
+                      description:
+                        "The caller's spoken/spelled email input (including words like at/dot).",
+                    },
+                  },
+                  required: ["spoken"],
+                },
+              },
+              {
+                type: "function",
+                name: "book_appointment",
+                description:
+                  "Book an appointment/call and send a confirmation email with a calendar invite (.ics).",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    startTime: {
+                      type: "string",
+                      description:
+                        "Appointment start time as ISO 8601 (e.g. 2026-01-05T10:00:00-08:00)",
+                    },
+                    timeZone: {
+                      type: "string",
+                      description:
+                        "IANA timezone name (e.g. America/Los_Angeles). If omitted, a tenant default is used.",
+                    },
+                    durationMinutes: {
+                      type: "number",
+                      description:
+                        "Length in minutes (defaults to 30 if omitted).",
+                    },
+                    summary: {
+                      type: "string",
+                      description: "Short title for the appointment.",
+                    },
+                    description: {
+                      type: "string",
+                      description: "Optional notes for the invite.",
+                    },
+                    location: {
+                      type: "string",
+                      description:
+                        "Optional location or 'Phone call' / 'Google Meet'.",
+                    },
+                    attendeeEmail: {
+                      type: "string",
+                      description:
+                        "Email address to send the confirmation invite to. If omitted, uses the caller email on file.",
+                    },
+                    emailConfirmed: {
+                      type: "boolean",
+                      description:
+                        "Set to true ONLY after you read back the email and the caller confirms it is correct.",
+                    },
+                    requireCalendarEvent: {
+                      type: "boolean",
+                      description:
+                        "If true (recommended), booking should only succeed if the appointment is added to the connected Google Calendar. If false, allow email-only confirmation.",
+                    },
+                  },
+                  required: ["startTime"],
                 },
               },
             ],
@@ -364,6 +1136,51 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         const transcript = this.extractUserTranscript(message);
         if (transcript) {
           console.log(`[TwilioRealtime] User transcript: ${transcript}`);
+
+          // Auto-handle identity/email confirmations when we have a pending candidate.
+          if (session.workflowContext?.pendingIdentityName) {
+            if (transcriptIsAffirmative(transcript)) {
+              session.workflowContext.identityVerified = true;
+              session.workflowContext.customer =
+                session.workflowContext.customer || {};
+              session.workflowContext.customer.name =
+                session.workflowContext.pendingIdentityName;
+              session.workflowContext.infoCollected =
+                session.workflowContext.infoCollected || [];
+              if (!session.workflowContext.infoCollected.includes("name")) {
+                session.workflowContext.infoCollected.push("name");
+              }
+              delete session.workflowContext.pendingIdentityName;
+              console.log(
+                `[TwilioRealtime] Identity confirmed for ${session.workflowContext.customer.name}`
+              );
+            } else if (transcriptIsNegative(transcript)) {
+              delete session.workflowContext.pendingIdentityName;
+            }
+          }
+
+          if (session.workflowContext?.pendingEmailCandidate) {
+            if (transcriptIsAffirmative(transcript)) {
+              session.workflowContext.customer =
+                session.workflowContext.customer || {};
+              session.workflowContext.customer.email =
+                session.workflowContext.pendingEmailCandidate;
+              session.workflowContext.emailConfirmed = true;
+              session.workflowContext.infoCollected =
+                session.workflowContext.infoCollected || [];
+              if (!session.workflowContext.infoCollected.includes("email")) {
+                session.workflowContext.infoCollected.push("email");
+              }
+              delete session.workflowContext.pendingEmailCandidate;
+              console.log(
+                `[TwilioRealtime] Email confirmed: ${session.workflowContext.customer.email}`
+              );
+            } else if (transcriptIsNegative(transcript)) {
+              session.workflowContext.emailConfirmed = false;
+              delete session.workflowContext.pendingEmailCandidate;
+            }
+          }
+
           if (this.userWantsToEndCall(transcript)) {
             session.pendingHangupReason = "caller_requested";
             session.hangupAfterThisResponse = false;
@@ -444,8 +1261,14 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           }
 
           if (session.pendingHangupReason && session.hangupAfterThisResponse) {
-            // Fire-and-forget; teardown is best-effort.
-            this.hangupCall(sessionId, session.pendingHangupReason);
+            // Wait 2 seconds to ensure the goodbye audio finishes playing before hanging up
+            console.log(
+              `[TwilioRealtime] Waiting 2s for goodbye audio to complete before hanging up`
+            );
+            const hangupReason = session.pendingHangupReason; // Capture reason before timeout
+            setTimeout(() => {
+              this.hangupCall(sessionId, hangupReason);
+            }, 2000);
           } else {
             // Set up silence detection - check if user responds within 20 seconds
             this.scheduleSilenceCheck(sessionId);
@@ -611,6 +1434,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         if (args.name) {
           session.workflowContext.customer.name = args.name;
           collectedItems.push("name");
+          session.workflowContext.identityVerified = true;
           console.log(`[TwilioRealtime] Saved customer name: ${args.name}`);
         }
         if (args.email) {
@@ -663,6 +1487,90 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           this.promptForNextItem(sessionId, collectedItems);
         }
       }
+
+      if (functionName === "normalize_email_spelling") {
+        const result = normalizeEmailFromSpoken(args.spoken);
+
+        if (result.success && result.email) {
+          session.workflowContext = session.workflowContext || {};
+          session.workflowContext.pendingEmailCandidate = result.email;
+          session.workflowContext.emailConfirmed = false;
+        }
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify(result),
+              },
+            })
+          );
+
+          // Encourage read-back and confirmation.
+          if (result.success && result.email) {
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `Read back this email address slowly and ask the caller to confirm yes/no: ${result.email}. If they say it's wrong, ask them to spell it again using letters or phonetics.`,
+                },
+              })
+            );
+          }
+        }
+      }
+
+      if (functionName === "book_appointment") {
+        const result = await this.bookAppointment(session, {
+          startTime: args.startTime,
+          timeZone: args.timeZone,
+          durationMinutes: args.durationMinutes,
+          summary: args.summary,
+          description: args.description,
+          location: args.location,
+          attendeeEmail: args.attendeeEmail,
+          requireCalendarEvent: args.requireCalendarEvent,
+          emailConfirmed: args.emailConfirmed,
+        });
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify(result),
+              },
+            })
+          );
+
+          // Prompt the assistant to confirm to the caller.
+          session.responseRequested = true;
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions: result.success
+                  ? result.calendarEventCreated
+                    ? `Confirm the appointment is booked on the connected calendar. Read back the email address (${result.attendeeEmail}) and confirm it is correct. Briefly restate the time and time zone. Mention that a confirmation email with a calendar invite was sent.`
+                    : `Tell the caller you sent a confirmation email with a calendar invite to ${result.attendeeEmail}, but the calendar event was not created on the connected calendar. Ask if they'd like to try again after connecting Google Calendar, or if email-only is acceptable.`
+                  : result.suggestions?.length
+                  ? `Explain you couldn't book that time because it conflicts with the connected calendar. Offer these alternative times (in the caller's time zone) and ask which one they want: ${result.suggestions
+                      .map((s) => s.startTime)
+                      .join(", ")}.`
+                  : `Apologize and explain you couldn't book the appointment: ${result.message}. If Google Calendar isn't available, explain that the appointment was NOT added to the calendar. Ask if they'd like to proceed with email-only confirmation (and then retry with requireCalendarEvent=false), or if they want to connect/enable Google Calendar first.`,
+              },
+            })
+          );
+        }
+      }
     } catch (error) {
       console.error(`[TwilioRealtime] Error handling function call:`, error);
     }
@@ -681,6 +1589,31 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     if (!session.workflowContext) session.workflowContext = {};
     if (!session.workflowContext.infoCollected) {
       session.workflowContext.infoCollected = [];
+    }
+
+    // If we already have customer info from context, treat it as collected
+    // so we don't re-ask after the caller says "that's it".
+    if (requestInfo.name === true && session.workflowContext?.customer?.name) {
+      if (!session.workflowContext.infoCollected.includes("name")) {
+        session.workflowContext.infoCollected.push("name");
+      }
+    }
+    if (
+      requestInfo.email === true &&
+      session.workflowContext?.customer?.email
+    ) {
+      if (!session.workflowContext.infoCollected.includes("email")) {
+        session.workflowContext.infoCollected.push("email");
+      }
+    }
+    if (
+      requestInfo.callbackNumber === true &&
+      (session.workflowContext?.customer?.phone ||
+        session.workflowContext?.call?.from)
+    ) {
+      if (!session.workflowContext.infoCollected.includes("phone")) {
+        session.workflowContext.infoCollected.push("phone");
+      }
     }
 
     // Add just collected items to the tracker
@@ -880,20 +1813,32 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       `[TwilioRealtime] Customer info - name: ${hasCustomerName}, email: ${hasCustomerEmail}, phone: ${hasPhoneNumber}`
     );
 
-    // Build list of information to request based on config
-    // Note: We ask for ALL configured info, not just missing info (allows verification/updates)
+    // Build list of information to request.
+    // Voice calls should always confirm identity for known callers, and always collect a name for unknown callers.
     const infoToRequest: string[] = [];
 
-    if (requestInfo.name === true) {
+    const identityVerified = Boolean(session.workflowContext?.identityVerified);
+
+    // For voice calls, if customer was found in database by phone number and has a name,
+    // consider them verified (they called from their registered number)
+    const customerFoundByPhone =
+      Boolean(hasCustomerName) && Boolean(hasPhoneNumber);
+    const shouldSkipNameVerification = customerFoundByPhone || identityVerified;
+
+    const shouldVerifyKnownName =
+      Boolean(hasCustomerName) && !shouldSkipNameVerification;
+    const shouldCollectUnknownName = !hasCustomerName;
+
+    if (shouldVerifyKnownName || shouldCollectUnknownName) {
       infoToRequest.push("their full name");
       console.log(
-        `[TwilioRealtime] Will request name (currently have: ${
+        `[TwilioRealtime] Will request/verify name (have=${
           hasCustomerName || "none"
-        })`
+        }, verified=${shouldSkipNameVerification})`
       );
     }
 
-    if (requestInfo.email === true) {
+    if (requestInfo.email === true && !hasCustomerEmail) {
       infoToRequest.push("their email address");
       console.log(
         `[TwilioRealtime] Will request email (currently have: ${
@@ -902,7 +1847,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       );
     }
 
-    if (requestInfo.callbackNumber === true) {
+    if (requestInfo.callbackNumber === true && !hasPhoneNumber) {
       infoToRequest.push("a callback phone number");
       console.log(
         `[TwilioRealtime] Will request callback number (currently have: ${
@@ -927,6 +1872,29 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         `[TwilioRealtime] No missing information to request - requestInfo:`,
         requestInfo
       );
+
+      // Mark existing values as collected so later prompts don't re-ask.
+      session.workflowContext = session.workflowContext || {};
+      session.workflowContext.infoCollected =
+        session.workflowContext.infoCollected || [];
+      if (requestInfo.name === true && hasCustomerName) {
+        if (!session.workflowContext.infoCollected.includes("name")) {
+          session.workflowContext.infoCollected.push("name");
+        }
+      }
+      if (requestInfo.email === true && hasCustomerEmail) {
+        if (!session.workflowContext.infoCollected.includes("email")) {
+          session.workflowContext.infoCollected.push("email");
+        }
+      }
+      if (requestInfo.callbackNumber === true && hasPhoneNumber) {
+        if (!session.workflowContext.infoCollected.includes("phone")) {
+          session.workflowContext.infoCollected.push("phone");
+        }
+      }
+
+      // Prevent repeat prompts.
+      session.infoRequestSent = true;
       return;
     }
 
@@ -944,8 +1912,26 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     let collectionInstructions = `You need to collect the following information from the caller: ${infoList}.\n\n`;
 
     // If we have existing customer name, ask for verification first
-    if (requestInfo.name === true && hasCustomerName) {
-      collectionInstructions += `IMPORTANT: Our records show this number belongs to ${hasCustomerName}. Start by asking the caller to confirm their name for verification. If they give a different name, use the update_customer_info function to save the correct name.\n\n`;
+    if (
+      hasCustomerName &&
+      (shouldVerifyKnownName || requestInfo.name === true)
+    ) {
+      session.workflowContext = session.workflowContext || {};
+      session.workflowContext.pendingIdentityName = String(hasCustomerName);
+      collectionInstructions += `IMPORTANT IDENTITY CHECK: Our records show this number belongs to ${hasCustomerName}. Start by asking: "Are you ${hasCustomerName}?" If they say YES, immediately call update_customer_info with name "${hasCustomerName}" (even though we already have it) to mark it verified/collected. If they say NO, ask for their full name and call update_customer_info with the correct name.\n\n`;
+    }
+
+    if (
+      (requestInfo.name === true || shouldVerifyKnownName) &&
+      hasCustomerName
+    ) {
+      collectionInstructions +=
+        "IMPORTANT: Even if the caller confirms the same name we already have, still call update_customer_info with the confirmed name so the system marks it collected.\n\n";
+    }
+
+    if (requestInfo.email === true && hasCustomerEmail) {
+      collectionInstructions +=
+        "IMPORTANT: If the caller confirms the same email we already have, still call update_customer_info with the confirmed email so the system marks it collected.\n\n";
     }
 
     collectionInstructions += `Ask for ONE piece of information at a time. After the caller provides each piece:

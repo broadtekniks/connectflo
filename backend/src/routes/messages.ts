@@ -4,6 +4,8 @@ import { MessageSender, Sentiment } from "@prisma/client";
 import { OpenAIService } from "../services/ai/openai";
 import { KnowledgeBaseService } from "../services/knowledgeBase";
 import { AuthRequest } from "../middleware/auth";
+import { isTenantOpenNow } from "../services/businessHours";
+import { sendSms } from "../services/sms";
 
 const router = Router();
 const aiService = new OpenAIService();
@@ -59,6 +61,32 @@ router.post("/", async (req: Request, res: Response) => {
       timestamp: message.createdAt.toISOString(),
     });
 
+    // If this is an SMS conversation and sender is AGENT/AI, send SMS
+    if (
+      conversation.channel === "SMS" &&
+      (sender === "AGENT" || sender === "AI") &&
+      !isPrivateNote
+    ) {
+      const customer = await prisma.user.findUnique({
+        where: { id: conversation.customerId },
+      });
+
+      if (customer && (customer as any).phoneNumber) {
+        try {
+          await sendSms({
+            tenantId,
+            to: (customer as any).phoneNumber,
+            body: content,
+          });
+          console.log(
+            `[SMS] Sent message to ${(customer as any).phoneNumber}`
+          );
+        } catch (error) {
+          console.error("[SMS] Failed to send message:", error);
+        }
+      }
+    }
+
     // Background AI Processing
 
     // 1. Analyze Sentiment
@@ -97,6 +125,25 @@ router.post("/", async (req: Request, res: Response) => {
             .reverse()
             .find((m: any) => m.sender === "CUSTOMER")?.content;
 
+          const tenant = await prisma.tenant.findUnique({
+            where: { id: conversation.tenantId },
+            select: {
+              businessTimeZone: true,
+              businessHours: true,
+              chatAfterHoursMode: true,
+              chatAfterHoursMessage: true,
+            },
+          });
+
+          const isOpenNow = tenant
+            ? isTenantOpenNow({
+                tenant: {
+                  timeZone: tenant.businessTimeZone,
+                  businessHours: tenant.businessHours,
+                },
+              })
+            : true;
+
           // Fetch AI Config for the tenant
           const aiConfig = await prisma.aiConfig.findUnique({
             where: { tenantId: conversation.tenantId },
@@ -127,6 +174,60 @@ router.post("/", async (req: Request, res: Response) => {
 Business Description: ${
             (effectiveAiConfig as any)?.businessDescription || "Not provided."
           }`;
+
+          // After-hours chat message logic: apply only when tenant prefers it.
+          if (!isOpenNow && tenant) {
+            const mode = String(
+              tenant.chatAfterHoursMode || "ONLY_ON_ESCALATION"
+            )
+              .trim()
+              .toUpperCase();
+
+            const defaultAfterHours =
+              "We're currently closed, but we've received your message. We'll follow up during business hours.";
+            const afterHoursText =
+              (tenant.chatAfterHoursMessage || "").trim() || defaultAfterHours;
+
+            const keywordEscalation = (lastUserMessage || "")
+              .toLowerCase()
+              .match(
+                /\b(agent|human|representative|call me|phone call|call back)\b/
+              );
+
+            let escalationNeeded = Boolean(keywordEscalation);
+            if (
+              !escalationNeeded &&
+              (effectiveAiConfig as any)?.autoEscalate &&
+              lastUserMessage
+            ) {
+              const sentiment = await aiService.analyzeSentiment(
+                lastUserMessage
+              );
+              escalationNeeded = sentiment === "NEGATIVE";
+            }
+
+            const shouldSendAfterHours =
+              mode === "ALWAYS" ||
+              (mode === "ONLY_ON_ESCALATION" && escalationNeeded);
+
+            if (shouldSendAfterHours) {
+              const aiMessage = await prisma.message.create({
+                data: {
+                  conversationId,
+                  tenantId: conversation.tenantId,
+                  content: afterHoursText,
+                  sender: "AI",
+                  isPrivateNote: false,
+                },
+              });
+
+              io.to(conversationId).emit("new_message", {
+                ...aiMessage,
+                timestamp: aiMessage.createdAt.toISOString(),
+              });
+              return;
+            }
+          }
 
           // Search knowledge base if we have a user query
           if (lastUserMessage && conversation.tenantId) {

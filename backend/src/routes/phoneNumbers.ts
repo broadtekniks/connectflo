@@ -10,6 +10,12 @@ const telnyxService = new TelnyxService();
 const twilioService = new TwilioService();
 const pricingService = new PricingService();
 
+const normalizeAfterHoursMode = (raw: unknown): "VOICEMAIL" | "AI_WORKFLOW" => {
+  const v = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+  if (v === "AI_WORKFLOW") return "AI_WORKFLOW";
+  return "VOICEMAIL";
+};
+
 // Get all owned numbers (from local DB)
 router.get("/", async (req: Request, res: Response) => {
   const authReq = req as AuthRequest;
@@ -65,6 +71,97 @@ router.get("/", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Failed to fetch phone numbers:", error);
     res.status(500).json({ error: "Failed to fetch phone numbers" });
+  }
+});
+
+// Update after-hours settings for a phone number
+router.put("/:id/after-hours", async (req: Request, res: Response) => {
+  const authReq = req as AuthRequest;
+  try {
+    const { id } = req.params;
+    const tenantId = authReq.user?.tenantId as string | undefined;
+    const role = authReq.user?.role as string | undefined;
+
+    if (role !== "TENANT_ADMIN" && role !== "SUPER_ADMIN") {
+      return res.status(403).json({ error: "Insufficient permissions" });
+    }
+
+    const phoneNumber = await prisma.phoneNumber.findUnique({
+      where: { id },
+      select: { id: true, tenantId: true },
+    });
+
+    if (!phoneNumber) {
+      return res.status(404).json({ error: "Phone number not found" });
+    }
+
+    if (role !== "SUPER_ADMIN" && tenantId !== phoneNumber.tenantId) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    const mode = normalizeAfterHoursMode(req.body?.afterHoursMode);
+    const afterHoursWorkflowId =
+      typeof req.body?.afterHoursWorkflowId === "string"
+        ? req.body.afterHoursWorkflowId.trim() || null
+        : null;
+    const afterHoursMessage =
+      typeof req.body?.afterHoursMessage === "string"
+        ? req.body.afterHoursMessage
+        : null;
+    const afterHoursNotifyUserId =
+      typeof req.body?.afterHoursNotifyUserId === "string"
+        ? req.body.afterHoursNotifyUserId.trim() || null
+        : null;
+
+    if (afterHoursWorkflowId) {
+      const workflow = await prisma.workflow.findFirst({
+        where: {
+          id: afterHoursWorkflowId,
+          tenantId: phoneNumber.tenantId,
+          triggerType: "Incoming Call",
+        },
+        select: { id: true },
+      });
+      if (!workflow) {
+        return res.status(400).json({ error: "Invalid after-hours workflow" });
+      }
+    }
+
+    if (afterHoursNotifyUserId) {
+      const user = await prisma.user.findFirst({
+        where: {
+          id: afterHoursNotifyUserId,
+          tenantId: phoneNumber.tenantId,
+          role: { in: ["TENANT_ADMIN", "AGENT"] },
+        },
+        select: { id: true },
+      });
+      if (!user) {
+        return res
+          .status(400)
+          .json({ error: "Invalid after-hours notify user" });
+      }
+    }
+
+    const updated = await prisma.phoneNumber.update({
+      where: { id },
+      data: {
+        afterHoursMode: mode,
+        afterHoursWorkflowId: afterHoursWorkflowId,
+        afterHoursMessage: afterHoursMessage,
+        afterHoursNotifyUserId: afterHoursNotifyUserId,
+      },
+      include: {
+        assignedTo: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error("Failed to update after-hours settings:", error);
+    res.status(500).json({ error: "Failed to update after-hours settings" });
   }
 });
 
@@ -140,8 +237,11 @@ router.post("/purchase", async (req: Request, res: Response) => {
           .json({ error: "Twilio credentials not configured" });
       }
 
-      const webhookUrl = process.env.TWILIO_WEBHOOK_URL || "";
-      await twilioService.purchaseNumber(phoneNumber, webhookUrl);
+      const voiceWebhookUrl = process.env.TWILIO_WEBHOOK_URL || "";
+      const smsWebhookUrl = process.env.SMS_WEBHOOK_URL || 
+        (voiceWebhookUrl.replace(/\/voice$/, "/twilio/sms"));
+      
+      await twilioService.purchaseNumber(phoneNumber, voiceWebhookUrl, smsWebhookUrl);
 
       // Wait for provisioning
       await new Promise((resolve) => setTimeout(resolve, 2000));

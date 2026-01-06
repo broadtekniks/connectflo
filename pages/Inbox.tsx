@@ -180,32 +180,34 @@ const Inbox: React.FC = () => {
   }
 
   return (
-    <div className="flex h-full overflow-hidden">
-      <ConversationList
-        conversations={conversations}
-        selectedId={selectedId}
-        onSelect={setSelectedId}
-        currentUser={currentUser}
-        onCheckAssignments={handleCheckAssignments}
-        checkingAssignments={claiming}
-        checkAssignmentsMessage={claimMessage}
-      />
-      {selectedConversation ? (
-        <>
-          <ChatArea
-            conversation={selectedConversation}
-            currentUser={currentUser}
-            onSendMessage={handleSendMessage}
-            onArchive={(id) => setConfirmAction({ type: "ARCHIVE", id })}
-            onDelete={(id) => setConfirmAction({ type: "DELETE", id })}
-          />
-          <CustomerPanel conversation={selectedConversation} />
-        </>
-      ) : (
-        <div className="flex-1 flex items-center justify-center text-slate-400">
-          Select a conversation to start chatting
-        </div>
-      )}
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="flex flex-1 overflow-hidden">
+        <ConversationList
+          conversations={conversations}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          currentUser={currentUser}
+          onCheckAssignments={handleCheckAssignments}
+          checkingAssignments={claiming}
+          checkAssignmentsMessage={claimMessage}
+        />
+        {selectedConversation ? (
+          <>
+            <ChatArea
+              conversation={selectedConversation}
+              currentUser={currentUser}
+              onSendMessage={handleSendMessage}
+              onArchive={(id) => setConfirmAction({ type: "ARCHIVE", id })}
+              onDelete={(id) => setConfirmAction({ type: "DELETE", id })}
+            />
+            <CustomerPanel conversation={selectedConversation} />
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-slate-400">
+            Select a conversation to start chatting
+          </div>
+        )}
+      </div>
 
       <ConfirmationModal
         isOpen={!!confirmAction}

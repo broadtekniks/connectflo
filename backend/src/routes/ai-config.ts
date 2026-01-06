@@ -14,9 +14,11 @@ router.get("/", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Tenant ID not found in token" });
     }
 
-    // Verify tenant exists
+    // Verify tenant exists. Only select id to avoid failing if the database
+    // schema is temporarily behind the Prisma schema (missing unrelated columns).
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
+      select: { id: true },
     });
 
     if (!tenant) {
@@ -61,8 +63,12 @@ router.put("/", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Tenant ID not found in token" });
     }
 
-    // Verify tenant exists (handles stale tokens after DB reset)
-    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+    // Verify tenant exists (handles stale tokens after DB reset). Only select id
+    // to avoid failing if the DB is missing newer Tenant columns.
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true },
+    });
     if (!tenant) {
       return res
         .status(404)
@@ -131,8 +137,12 @@ router.get("/intents", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Tenant ID not found in token" });
     }
 
-    // Verify tenant exists (handles stale tokens after DB reset)
-    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+    // Verify tenant exists (handles stale tokens after DB reset). Only select id
+    // to avoid failing if the DB is missing newer Tenant columns.
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true },
+    });
     if (!tenant) {
       return res
         .status(404)
