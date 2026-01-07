@@ -18,6 +18,12 @@ import {
   UserPlus,
   PhoneIncoming,
   MessageCircle,
+  Hash,
+  Smartphone,
+  History,
+  Voicemail,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 
 import { api } from "../services/api";
@@ -43,6 +49,8 @@ const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [agentCheckedIn, setAgentCheckedIn] = useState<boolean>(false);
   const [agentBusy, setAgentBusy] = useState<boolean>(false);
+  const [telephonyOpen, setTelephonyOpen] = useState<boolean>(true);
+  const [voicemailUnreadCount, setVoicemailUnreadCount] = useState<number>(0);
 
   useEffect(() => {
     if (userRole !== "AGENT") return;
@@ -54,6 +62,34 @@ const Sidebar: React.FC<SidebarProps> = ({
         console.error("Failed to load agent check-in status", err);
       });
   }, [userRole]);
+
+  useEffect(() => {
+    const canSeeVoicemails =
+      userRole === "TENANT_ADMIN" ||
+      userRole === "AGENT" ||
+      userRole === "SUPER_ADMIN";
+
+    if (!canSeeVoicemails) return;
+
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        const res = await api.get("/voicemails/unread-count");
+        if (!mounted) return;
+        const count = Math.max(0, parseInt(String(res?.count ?? "0"), 10) || 0);
+        setVoicemailUnreadCount(count);
+      } catch {
+        // Non-blocking.
+      }
+    };
+
+    load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [userRole, currentView]);
 
   const handleToggleCheckIn = async () => {
     if (userRole !== "AGENT") return;
@@ -86,12 +122,6 @@ const Sidebar: React.FC<SidebarProps> = ({
       roles: ["TENANT_ADMIN", "AGENT"],
     },
     {
-      id: "voicemails",
-      label: "Voicemails",
-      icon: PhoneCall,
-      roles: ["TENANT_ADMIN", "AGENT"],
-    },
-    {
       id: "meetings",
       label: "Meetings",
       icon: Calendar,
@@ -104,22 +134,10 @@ const Sidebar: React.FC<SidebarProps> = ({
       roles: ["TENANT_ADMIN", "AGENT"],
     },
     {
-      id: "call-logs",
-      label: "Call Logs",
-      icon: PhoneIncoming,
-      roles: ["TENANT_ADMIN", "AGENT"],
-    },
-    {
       id: "feedback",
       label: "Feedback",
       icon: MessageCircle,
       roles: ["TENANT_ADMIN", "AGENT"],
-    },
-    {
-      id: "phone-numbers",
-      label: "Phone Numbers",
-      icon: Phone,
-      roles: ["SUPER_ADMIN", "TENANT_ADMIN"],
     },
     {
       id: "workflows",
@@ -175,6 +193,62 @@ const Sidebar: React.FC<SidebarProps> = ({
     item.roles.includes(userRole)
   );
 
+  const dashboardNavItem = filteredNavItems.find((i) => i.id === "dashboard");
+  const nonDashboardNavItems = filteredNavItems.filter(
+    (i) => i.id !== "dashboard"
+  );
+
+  const telephonyItems: Array<{
+    id: string;
+    label: string;
+    icon: any;
+    roles: Array<"SUPER_ADMIN" | "TENANT_ADMIN" | "AGENT" | "CUSTOMER">;
+    onClick?: () => void;
+  }> = [
+    {
+      id: "call-logs",
+      label: "Call Logs",
+      icon: History,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "phone-numbers",
+      label: "Phone Numbers",
+      icon: Phone,
+      roles: ["SUPER_ADMIN", "TENANT_ADMIN"],
+    },
+    {
+      id: "voicemails",
+      label: "Voicemails",
+      icon: Voicemail,
+      roles: ["TENANT_ADMIN", "AGENT"],
+    },
+    {
+      id: "settings:web-phone",
+      label: "Web Phone",
+      icon: Smartphone,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN"],
+      onClick: () => {
+        onNavigate("settings");
+        window.location.hash = "web-phone";
+      },
+    },
+    {
+      id: "settings:extensions",
+      label: "Extensions",
+      icon: Hash,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN", "AGENT"],
+      onClick: () => {
+        onNavigate("settings");
+        window.location.hash = "extensions";
+      },
+    },
+  ];
+
+  const filteredTelephonyItems = telephonyItems.filter((item) =>
+    item.roles.includes(userRole)
+  );
+
   return (
     <div
       className={`${
@@ -215,7 +289,91 @@ const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       <nav className="flex-1 py-6 space-y-1">
-        {filteredNavItems.map((item) => (
+        {dashboardNavItem && (
+          <button
+            key={dashboardNavItem.id}
+            onClick={() => onNavigate(dashboardNavItem.id)}
+            className={`w-full flex items-center px-3 py-3 transition-colors duration-200 ${
+              currentView === dashboardNavItem.id
+                ? "bg-indigo-600 text-white border-r-4 border-indigo-300"
+                : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            }`}
+            title={isCollapsed ? dashboardNavItem.label : undefined}
+          >
+            <dashboardNavItem.icon size={20} className="shrink-0" />
+            {!isCollapsed && (
+              <span className="ml-3 font-medium">{dashboardNavItem.label}</span>
+            )}
+          </button>
+        )}
+
+        {filteredTelephonyItems.length > 0 && (
+          <div className="px-1">
+            <button
+              type="button"
+              onClick={() => setTelephonyOpen((v) => !v)}
+              className={`w-full flex items-center px-3 py-3 transition-colors duration-200 text-slate-400 hover:bg-slate-800 hover:text-slate-100 ${
+                isCollapsed ? "justify-center" : "justify-between"
+              }`}
+              title={isCollapsed ? "Telephony" : undefined}
+            >
+              <span
+                className={`flex items-center ${isCollapsed ? "" : "gap-3"}`}
+              >
+                <PhoneCall size={20} className="shrink-0" />
+                {!isCollapsed && (
+                  <span className="font-medium text-slate-200">Telephony</span>
+                )}
+              </span>
+              {!isCollapsed && (
+                <span className="shrink-0 text-slate-400">
+                  {telephonyOpen ? (
+                    <ChevronDown size={18} />
+                  ) : (
+                    <ChevronRight size={18} />
+                  )}
+                </span>
+              )}
+            </button>
+
+            {telephonyOpen && !isCollapsed && (
+              <div className="mt-1 space-y-1">
+                {filteredTelephonyItems.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      if (item.onClick) return item.onClick();
+                      onNavigate(item.id);
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-2 transition-colors duration-200 rounded-md ml-3 ${
+                      currentView === item.id ||
+                      (item.id.startsWith("settings:") &&
+                        currentView === "settings")
+                        ? "bg-slate-800 text-white"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                    }`}
+                  >
+                    <span className="flex items-center">
+                      <item.icon size={18} className="shrink-0" />
+                      <span className="ml-3 font-medium text-sm">
+                        {item.label}
+                      </span>
+                    </span>
+                    {item.id === "voicemails" && voicemailUnreadCount > 0 && (
+                      <span className="min-w-5 h-5 px-1 rounded-full bg-indigo-600 text-white text-[10px] leading-5 text-center font-bold shrink-0">
+                        {voicemailUnreadCount > 99
+                          ? "99+"
+                          : String(voicemailUnreadCount)}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {nonDashboardNavItems.map((item) => (
           <button
             key={item.id}
             onClick={() => onNavigate(item.id)}

@@ -5,11 +5,9 @@ import {
   User,
   PhoneIncoming,
   PhoneOutgoing,
-  Play,
   FileText,
   RefreshCw,
   Filter,
-  ExternalLink,
 } from "lucide-react";
 import { api } from "../services/api";
 import { DateTime } from "luxon";
@@ -31,7 +29,7 @@ interface CallLog {
     id: string;
     name: string;
     email: string;
-    phone: string;
+    phoneNumber: string;
   };
   phoneNumber?: {
     id: string;
@@ -292,6 +290,11 @@ const CallLogs: React.FC = () => {
                           >
                             {call.status}
                           </span>
+                          {call.recordingUrl && (
+                            <span className="px-3 py-1 text-xs font-semibold rounded-full bg-indigo-100 text-indigo-700 uppercase tracking-wide">
+                              Voicemail
+                            </span>
+                          )}
                           {call.sentiment && (
                             <span
                               className={`px-3 py-1 text-xs font-semibold rounded-full ${getSentimentColor(
@@ -390,22 +393,6 @@ const CallLogs: React.FC = () => {
                       <p className="text-sm text-slate-700 leading-relaxed">
                         {call.transcriptSummary}
                       </p>
-                    </div>
-                  )}
-
-                  {/* Recording */}
-                  {call.recordingUrl && (
-                    <div className="flex items-center gap-3">
-                      <a
-                        href={call.recordingUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-200 font-semibold text-sm transition-all"
-                      >
-                        <Play size={16} />
-                        Play Recording
-                        <ExternalLink size={14} />
-                      </a>
                     </div>
                   )}
                 </div>

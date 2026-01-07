@@ -12,6 +12,22 @@ import { GoogleDriveService } from "./integrations/google/drive";
 import { GoogleSheetsService } from "./integrations/google/sheets";
 import { buildIcsInvite } from "./calendarInvite";
 import { DateTime } from "luxon";
+import { isTenantOpenNow } from "./businessHours";
+
+export type WorkflowTriggerResult =
+  | { status: "no_workflow"; reason: "not_found" }
+  | {
+      status: "skipped";
+      reason: "after_hours" | "no_trigger_node";
+      isOpenNow: false;
+      afterHours?: { shouldReply: boolean; text?: string };
+    }
+  | {
+      status: "started";
+      workflowId: string;
+      executionId: string;
+      isOpenNow: boolean;
+    };
 
 interface WorkflowNode {
   id: string;
@@ -88,10 +104,14 @@ export class WorkflowEngine {
     }
 
     // Parse working hours times (format: "HH:mm")
-    const [startHour, startMin] = dayHours.start.split(':').map(Number);
-    const [endHour, endMin] = dayHours.end.split(':').map(Number);
+    const [startHour, startMin] = dayHours.start.split(":").map(Number);
+    const [endHour, endMin] = dayHours.end.split(":").map(Number);
 
-    const workStart = start.set({ hour: startHour, minute: startMin, second: 0 });
+    const workStart = start.set({
+      hour: startHour,
+      minute: startMin,
+      second: 0,
+    });
     const workEnd = start.set({ hour: endHour, minute: endMin, second: 0 });
 
     // Check if appointment is within working hours
@@ -101,47 +121,173 @@ export class WorkflowEngine {
   /**
    * Entry point for external events (Webhooks, API calls)
    */
-  async trigger(triggerType: string, contextData: any) {
-    // Find the active workflow for this trigger type and load assigned resources
-    const workflow = await prisma.workflow.findFirst({
-      where: {
-        isActive: true,
-        triggerType: triggerType,
+  async trigger(
+    triggerType: string,
+    contextData: any
+  ): Promise<WorkflowTriggerResult> {
+    const tenantId: string | undefined =
+      (typeof contextData?.tenantId === "string" && contextData.tenantId) ||
+      (typeof contextData?.tenant?.id === "string" && contextData.tenant.id) ||
+      (typeof contextData?.trigger?.tenantId === "string" &&
+        contextData.trigger.tenantId) ||
+      undefined;
+
+    const toNumberRaw: string | undefined =
+      (typeof contextData?.toNumber === "string" && contextData.toNumber) ||
+      (typeof contextData?.phoneNumber === "string" &&
+        contextData.phoneNumber) ||
+      (typeof contextData?.To === "string" && contextData.To) ||
+      (typeof contextData?.message?.to === "string" &&
+        contextData.message.to) ||
+      (typeof contextData?.call?.to === "string" && contextData.call.to) ||
+      (typeof contextData?.trigger?.phoneNumber === "string" &&
+        contextData.trigger.phoneNumber) ||
+      undefined;
+
+    const toNumber = String(toNumberRaw || "").trim() || undefined;
+
+    const include = {
+      tenant: {
+        select: {
+          id: true,
+          businessTimeZone: true,
+          businessHours: true,
+          chatAfterHoursMode: true,
+          chatAfterHoursMessage: true,
+        },
       },
-      include: {
-        aiConfig: true,
-        assignedAgent: {
-          select: {
-            id: true,
-            name: true,
-            agentTimeZone: true,
-            workingHours: true,
+      aiConfig: true,
+      assignedAgent: {
+        select: {
+          id: true,
+          name: true,
+          agentTimeZone: true,
+          workingHours: true,
+        },
+      },
+      phoneNumbers: {
+        include: { phoneNumber: true },
+      },
+      documents: {
+        include: {
+          document: {
+            include: { chunks: true },
           },
         },
-        phoneNumbers: {
-          include: { phoneNumber: true },
+      },
+      integrations: {
+        include: { integration: true },
+      },
+    } as any;
+
+    const baseWhere: any = {
+      isActive: true,
+      triggerType: triggerType,
+      ...(tenantId ? { tenantId } : {}),
+    };
+
+    let workflow: any = null;
+
+    if (toNumber) {
+      workflow = await prisma.workflow.findFirst({
+        where: {
+          ...baseWhere,
+          phoneNumbers: { some: { phoneNumber: { number: toNumber } } },
         },
-        documents: {
-          include: {
-            document: {
-              include: { chunks: true },
-            },
-          },
-        },
-        integrations: {
-          include: { integration: true },
-        },
-      } as any,
-    });
+        include,
+        orderBy: { updatedAt: "desc" },
+      } as any);
+    }
 
     if (!workflow) {
-      return;
+      workflow = await prisma.workflow.findFirst({
+        where: baseWhere,
+        include,
+        orderBy: { updatedAt: "desc" },
+      } as any);
     }
+
+    if (!workflow) {
+      return { status: "no_workflow", reason: "not_found" };
+    }
+
+    const tenantPrefs: any = workflow.tenant;
+
+    const hasDaysObject = (raw: any): boolean => {
+      if (!raw || typeof raw !== "object") return false;
+      const days = (raw as any).days;
+      return Boolean(days && typeof days === "object");
+    };
+
+    const effectiveTimeZone =
+      String((workflow.businessTimeZone || "").trim()) ||
+      String((tenantPrefs?.businessTimeZone || "").trim()) ||
+      "UTC";
+
+    const effectiveBusinessHoursRaw = hasDaysObject(workflow.businessHours)
+      ? workflow.businessHours
+      : tenantPrefs?.businessHours;
+
+    const bypassBusinessHours = contextData?.bypassBusinessHours === true;
+    const isOpenNow = bypassBusinessHours
+      ? true
+      : isTenantOpenNow({
+          tenant: {
+            timeZone: effectiveTimeZone,
+            businessHours: effectiveBusinessHoursRaw,
+          },
+        });
+
+    const lastUserText =
+      (typeof contextData?.message?.text === "string" &&
+        contextData.message.text) ||
+      (typeof contextData?.text === "string" && contextData.text) ||
+      (typeof contextData?.Body === "string" && contextData.Body) ||
+      (typeof contextData?.message === "string" && contextData.message) ||
+      "";
+
+    if (!isOpenNow && triggerType === "Incoming Message") {
+      const mode = String(
+        tenantPrefs?.chatAfterHoursMode || "ONLY_ON_ESCALATION"
+      )
+        .trim()
+        .toUpperCase();
+
+      const defaultAfterHours =
+        "We're currently closed, but we've received your message. We'll follow up during business hours.";
+      const afterHoursText =
+        String(tenantPrefs?.chatAfterHoursMessage || "").trim() ||
+        defaultAfterHours;
+
+      const keywordEscalation = String(lastUserText || "")
+        .toLowerCase()
+        .match(/\b(agent|human|representative|call me|phone call|call back)\b/);
+
+      const escalationNeeded = Boolean(keywordEscalation);
+
+      const shouldReply =
+        triggerType === "Incoming Message" &&
+        (mode === "ALWAYS" ||
+          (mode === "ONLY_ON_ESCALATION" && escalationNeeded));
+
+      return {
+        status: "skipped",
+        reason: "after_hours",
+        isOpenNow: false,
+        afterHours: shouldReply
+          ? { shouldReply: true, text: afterHoursText }
+          : { shouldReply: false },
+      };
+    }
+
+    const executionId = `exec_${Date.now()}_${Math.random()
+      .toString(36)
+      .substr(2, 9)}`;
 
     // Initialize comprehensive workflow context
     const context: WorkflowContext = {
       execution: {
-        id: `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        id: executionId,
         workflowId: workflow.id,
         tenantId: workflow.tenantId,
         startedAt: new Date(),
@@ -153,7 +299,7 @@ export class WorkflowEngine {
       variables: {
         workflow: {},
         conversation: {},
-        global: {},
+        global: { isOpenNow },
       },
       customer: {
         id: contextData.customerId,
@@ -201,6 +347,7 @@ export class WorkflowEngine {
       workflowId: workflow.id,
       workflowTenantId: workflow.tenantId,
       workflowResources: context.resources,
+      isOpenNow,
     };
 
     // 2. Parse nodes and edges
@@ -218,7 +365,7 @@ export class WorkflowEngine {
 
     if (!triggerNode) {
       console.error("[WorkflowEngine] No trigger node found in workflow");
-      return;
+      return { status: "skipped", reason: "no_trigger_node", isOpenNow: false };
     }
 
     // Auto-answer incoming calls
@@ -279,6 +426,13 @@ export class WorkflowEngine {
 
     // 4. Start execution
     await this.executeNode(triggerNode, nodes, edges, context, legacyContext);
+
+    return {
+      status: "started",
+      workflowId: workflow.id,
+      executionId,
+      isOpenNow,
+    };
   }
 
   private async executeNode(
@@ -753,26 +907,32 @@ export class WorkflowEngine {
           const assignedAgent = (context.resources as any)?.assignedAgent;
           const tenantPrefs = await prisma.tenant.findUnique({
             where: { id: context.execution.tenantId },
-            select: { 
+            select: {
               calendarAutoAddMeet: true,
               businessHours: true,
               businessTimeZone: true,
             },
           });
 
-          const workingHours = assignedAgent?.workingHours || tenantPrefs?.businessHours;
-          const workingHoursTimeZone = assignedAgent?.agentTimeZone || tenantPrefs?.businessTimeZone || timeZone;
-          
-          if (workingHours && typeof workingHours === 'object') {
+          const workingHours =
+            assignedAgent?.workingHours || tenantPrefs?.businessHours;
+          const workingHoursTimeZone =
+            assignedAgent?.agentTimeZone ||
+            tenantPrefs?.businessTimeZone ||
+            timeZone;
+
+          if (workingHours && typeof workingHours === "object") {
             const isWithinWorkingHours = this.checkWithinWorkingHours(
               startTime,
               endTime,
               workingHours as any,
               workingHoursTimeZone
             );
-            
+
             if (!isWithinWorkingHours) {
-              const scheduleName = assignedAgent ? `${assignedAgent.name}'s schedule` : 'business hours';
+              const scheduleName = assignedAgent
+                ? `${assignedAgent.name}'s schedule`
+                : "business hours";
               console.warn(
                 `[WorkflowEngine] Create Calendar Event: Time ${startTime} is outside ${scheduleName}`
               );
@@ -788,7 +948,6 @@ export class WorkflowEngine {
             meetLink?: string;
           } | null = null;
           try {
-
             const addMeet =
               typeof config?.addMeeting === "boolean"
                 ? Boolean(config.addMeeting)

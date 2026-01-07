@@ -43,6 +43,7 @@ model User {
   updatedAt             DateTime       @updatedAt
   assignedConversations Conversation[] @relation("AssignedAgent")
   conversations         Conversation[] @relation("Customer")
+  conversationReads     ConversationRead[]
   assignedPhoneNumbers  PhoneNumber[]  @relation("AssignedUser")
   afterHoursPhoneNumbers PhoneNumber[] @relation("AfterHoursNotifyUser")
   callerIdPhoneNumber   PhoneNumber?   @relation("CallerIdPhoneNumber", fields: [callerIdPhoneNumberId], references: [id])
@@ -77,6 +78,7 @@ model Conversation {
   assignee     User?              @relation("AssignedAgent", fields: [assigneeId], references: [id])
   customer     User               @relation("Customer", fields: [customerId], references: [id])
   messages     Message[]
+  reads        ConversationRead[]
   usageRecords UsageRecord[]
 
   @@index([tenantId])
@@ -95,6 +97,25 @@ model Message {
   conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, createdAt])
+  @@index([conversationId])
+}
+
+model ConversationRead {
+  id             String   @id @default(uuid())
+  tenantId       String
+  conversationId String
+  userId         String
+  readAt         DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([tenantId])
+  @@index([userId])
   @@index([conversationId])
 }
 
@@ -160,6 +181,11 @@ model Workflow {
   edges              Json
   tenantId           String
   assignedAgentId    String?               // Assigned agent for this workflow (null = any agent)
+  businessTimeZone   String?
+  businessHours      Json?
+  afterHoursMode     String?
+  afterHoursMessage  String?
+  afterHoursWorkflowId String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
   aiConfigId         String?
@@ -241,6 +267,7 @@ model Tenant {
   documents           Document[]
   documentChunks      DocumentChunk[]
   messages            Message[]
+  conversationReads   ConversationRead[]
   integrations        Integration[]
   workflows           Workflow[]
   workflowDocuments   WorkflowDocument[]

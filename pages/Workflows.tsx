@@ -73,6 +73,107 @@ const isSendEmailFieldMissing = (
   return value.length === 0;
 };
 
+const getDetectedTimeZone = (): string => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+
+const getTimeZoneOptions = (preferred?: string): string[] => {
+  const intlAny: any = Intl as any;
+  if (typeof intlAny.supportedValuesOf === "function") {
+    try {
+      const zones = intlAny.supportedValuesOf("timeZone");
+      if (Array.isArray(zones) && zones.length > 0) {
+        if (preferred && !zones.includes(preferred)) {
+          return [preferred, ...zones];
+        }
+        return zones;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  const fallback = [
+    "UTC",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Phoenix",
+    "America/Toronto",
+    "America/Sao_Paulo",
+    "Europe/London",
+    "Europe/Berlin",
+    "Europe/Paris",
+    "Europe/Madrid",
+    "Africa/Lagos",
+    "Africa/Johannesburg",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Singapore",
+    "Asia/Tokyo",
+    "Australia/Sydney",
+  ];
+
+  if (preferred && !fallback.includes(preferred)) {
+    return [preferred, ...fallback];
+  }
+  return fallback;
+};
+
+type BusinessHoursDayKey =
+  | "mon"
+  | "tue"
+  | "wed"
+  | "thu"
+  | "fri"
+  | "sat"
+  | "sun";
+
+type BusinessHoursConfig = {
+  days: Record<
+    BusinessHoursDayKey,
+    { enabled: boolean; start: string; end: string }
+  >;
+};
+
+const DEFAULT_BUSINESS_HOURS: BusinessHoursConfig = {
+  days: {
+    mon: { enabled: true, start: "09:00", end: "17:00" },
+    tue: { enabled: true, start: "09:00", end: "17:00" },
+    wed: { enabled: true, start: "09:00", end: "17:00" },
+    thu: { enabled: true, start: "09:00", end: "17:00" },
+    fri: { enabled: true, start: "09:00", end: "17:00" },
+    sat: { enabled: false, start: "09:00", end: "17:00" },
+    sun: { enabled: false, start: "09:00", end: "17:00" },
+  },
+};
+
+const normalizeBusinessHoursConfig = (raw: any): BusinessHoursConfig => {
+  const days = raw?.days;
+  if (!days || typeof days !== "object") return DEFAULT_BUSINESS_HOURS;
+
+  const out: BusinessHoursConfig = {
+    days: { ...DEFAULT_BUSINESS_HOURS.days },
+  };
+
+  (Object.keys(out.days) as BusinessHoursDayKey[]).forEach((k) => {
+    const d = days?.[k];
+    if (!d || typeof d !== "object") return;
+
+    const enabled = Boolean(d.enabled);
+    const start = typeof d.start === "string" ? d.start : out.days[k].start;
+    const end = typeof d.end === "string" ? d.end : out.days[k].end;
+    out.days[k] = { enabled, start, end };
+  });
+
+  return out;
+};
+
 // --- Component Library Definition ---
 
 const CONFIG_CATEGORY_NAME = "Configuration";
@@ -80,6 +181,7 @@ const CONFIG_NODE_LABELS = new Set([
   "Knowledge Base",
   "AI Configuration",
   "Agent Assignment",
+  "Time Settings",
 ]);
 
 const COMPONENT_LIBRARY = [
@@ -126,6 +228,12 @@ const COMPONENT_LIBRARY = [
         icon: UserCheck,
         type: "config",
         subLabel: "Assign agent & hours",
+      },
+      {
+        label: "Time Settings",
+        icon: Clock,
+        type: "config",
+        subLabel: "Timezone & business hours",
       },
     ],
   },
@@ -980,6 +1088,16 @@ const Workflows: React.FC = () => {
       if (typeof data?.maxMeetingDurationMinutes === "number") {
         setTenantMaxMeetingDuration(data.maxMeetingDurationMinutes);
       }
+
+      if (typeof data?.timeZone === "string" && data.timeZone.trim()) {
+        setTenantBusinessTimeZone(String(data.timeZone).trim());
+      } else {
+        setTenantBusinessTimeZone(getDetectedTimeZone());
+      }
+
+      if (data?.businessHours) {
+        setTenantBusinessHours(data.businessHours);
+      }
     } catch (error) {
       console.error("Failed to fetch tenant business hours:", error);
     }
@@ -1034,13 +1152,17 @@ const Workflows: React.FC = () => {
 
   const [tenantMaxMeetingDuration, setTenantMaxMeetingDuration] =
     useState<number>(60);
+  const [tenantBusinessTimeZone, setTenantBusinessTimeZone] = useState<string>(
+    getDetectedTimeZone()
+  );
+  const [tenantBusinessHours, setTenantBusinessHours] = useState<any>(null);
 
   // Sidebar resize state
   const [sidebarWidth, setSidebarWidth] = useState<number>(320); // 320px = w-80 default
   const [isResizing, setIsResizing] = useState<boolean>(false);
 
   // Resize handlers
-  const handleResizeStart = (e: React.MouseEvent) => {
+  const handleResizeStart = (e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
     setIsResizing(true);
   };
@@ -1054,6 +1176,15 @@ const Workflows: React.FC = () => {
       setSidebarWidth(constrainedWidth);
     };
 
+    const handleResizeMoveTouch = (e: TouchEvent) => {
+      if (!isResizing) return;
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      const newWidth = window.innerWidth - touch.clientX;
+      const constrainedWidth = Math.max(280, Math.min(800, newWidth));
+      setSidebarWidth(constrainedWidth);
+    };
+
     const handleResizeEnd = () => {
       setIsResizing(false);
     };
@@ -1061,11 +1192,17 @@ const Workflows: React.FC = () => {
     if (isResizing) {
       document.addEventListener("mousemove", handleResizeMove);
       document.addEventListener("mouseup", handleResizeEnd);
+      document.addEventListener("touchmove", handleResizeMoveTouch, {
+        passive: false,
+      });
+      document.addEventListener("touchend", handleResizeEnd);
       document.body.style.cursor = "ew-resize";
       document.body.style.userSelect = "none";
       return () => {
         document.removeEventListener("mousemove", handleResizeMove);
         document.removeEventListener("mouseup", handleResizeEnd);
+        document.removeEventListener("touchmove", handleResizeMoveTouch);
+        document.removeEventListener("touchend", handleResizeEnd);
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
       };
@@ -1074,8 +1211,25 @@ const Workflows: React.FC = () => {
 
   // Workflow-level configuration (persistent resources, not canvas nodes)
   const [activeWorkflowConfigPanel, setActiveWorkflowConfigPanel] = useState<
-    null | "knowledgeBase" | "aiConfig" | "agentAssignment"
+    null | "knowledgeBase" | "aiConfig" | "agentAssignment" | "timeSettings"
   >(null);
+
+  const [workflowOverrideTimeZone, setWorkflowOverrideTimeZone] =
+    useState<boolean>(false);
+  const [workflowOverrideBusinessHours, setWorkflowOverrideBusinessHours] =
+    useState<boolean>(false);
+  const [workflowTimeZoneDraft, setWorkflowTimeZoneDraft] = useState<string>(
+    tenantBusinessTimeZone || getDetectedTimeZone()
+  );
+  const [workflowBusinessHoursDraft, setWorkflowBusinessHoursDraft] =
+    useState<BusinessHoursConfig>(DEFAULT_BUSINESS_HOURS);
+  const [workflowAfterHoursMode, setWorkflowAfterHoursMode] =
+    useState<string>("USE_ORG");
+  const [workflowAfterHoursMessage, setWorkflowAfterHoursMessage] =
+    useState<string>("");
+  const [workflowAfterHoursWorkflowId, setWorkflowAfterHoursWorkflowId] =
+    useState<string | null>(null);
+  const [savingTimeSettings, setSavingTimeSettings] = useState(false);
 
   const configCategory = COMPONENT_LIBRARY.find(
     (c) => c.category === CONFIG_CATEGORY_NAME
@@ -1260,6 +1414,8 @@ const Workflows: React.FC = () => {
     aiConfig: null,
     toneOfVoice: null,
     assignedAgent: null,
+    businessTimeZone: null,
+    businessHours: null,
   });
   const [availableDocuments, setAvailableDocuments] = useState<any[]>([]);
   const [availableIntegrations, setAvailableIntegrations] = useState<any[]>([]);
@@ -1655,11 +1811,156 @@ const Workflows: React.FC = () => {
 
   const getWorkflowConfigPanelKey = (
     label: string
-  ): "knowledgeBase" | "aiConfig" | "agentAssignment" => {
+  ): "knowledgeBase" | "aiConfig" | "agentAssignment" | "timeSettings" => {
     if (label === "Knowledge Base") return "knowledgeBase";
     if (label === "Agent Assignment") return "agentAssignment";
+    if (label === "Time Settings") return "timeSettings";
     return "aiConfig";
   };
+
+  const saveWorkflowTimeSettings = async () => {
+    if (!selectedWorkflowMeta?.id) return;
+
+    const payload = {
+      businessTimeZone: workflowOverrideTimeZone
+        ? String(workflowTimeZoneDraft || "").trim() || null
+        : null,
+      businessHours: workflowOverrideBusinessHours
+        ? workflowBusinessHoursDraft
+        : null,
+      afterHoursMode:
+        workflowAfterHoursMode === "USE_ORG" ? null : workflowAfterHoursMode,
+      afterHoursMessage:
+        workflowAfterHoursMode === "CUSTOM_VOICEMAIL"
+          ? String(workflowAfterHoursMessage || "").trim() || null
+          : null,
+      afterHoursWorkflowId:
+        workflowAfterHoursMode === "REDIRECT_WORKFLOW"
+          ? workflowAfterHoursWorkflowId
+          : null,
+    };
+
+    setSavingTimeSettings(true);
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/time-settings`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+          body: JSON.stringify(payload),
+        }
+      );
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        setAlertModal({
+          isOpen: true,
+          title: "Save failed",
+          message: err?.error || "Failed to save workflow time settings.",
+          type: "error",
+        });
+        return;
+      }
+
+      await loadWorkflowResources();
+      setAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Workflow time settings updated.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to save workflow time settings", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: "Failed to save workflow time settings.",
+        type: "error",
+      });
+    } finally {
+      setSavingTimeSettings(false);
+    }
+  };
+
+  const clearWorkflowTimeSettings = async () => {
+    if (!selectedWorkflowMeta?.id) return;
+    setSavingTimeSettings(true);
+    try {
+      const response = await fetch(
+        `${API_URL}/workflow-resources/${selectedWorkflowMeta.id}/time-settings`,
+        {
+          method: "DELETE",
+          headers: authHeader(),
+        }
+      );
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        setAlertModal({
+          isOpen: true,
+          title: "Clear failed",
+          message: err?.error || "Failed to clear workflow time settings.",
+          type: "error",
+        });
+        return;
+      }
+
+      await loadWorkflowResources();
+      setAlertModal({
+        isOpen: true,
+        title: "Cleared",
+        message:
+          "Workflow time settings cleared (using organization settings).",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to clear workflow time settings", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Clear failed",
+        message: "Failed to clear workflow time settings.",
+        type: "error",
+      });
+    } finally {
+      setSavingTimeSettings(false);
+    }
+  };
+
+  useEffect(() => {
+    const tz = String(workflowResources?.businessTimeZone || "").trim();
+    const hasTzOverride = Boolean(tz);
+    setWorkflowOverrideTimeZone(hasTzOverride);
+    setWorkflowTimeZoneDraft(
+      tz || tenantBusinessTimeZone || getDetectedTimeZone()
+    );
+
+    const hasHoursOverride = Boolean(workflowResources?.businessHours);
+    setWorkflowOverrideBusinessHours(hasHoursOverride);
+    const baseHours = hasHoursOverride
+      ? workflowResources.businessHours
+      : tenantBusinessHours;
+    setWorkflowBusinessHoursDraft(normalizeBusinessHoursConfig(baseHours));
+
+    // Load after-hours settings
+    const afterHoursMode = String(
+      workflowResources?.afterHoursMode || ""
+    ).trim();
+    setWorkflowAfterHoursMode(afterHoursMode || "USE_ORG");
+    setWorkflowAfterHoursMessage(
+      String(workflowResources?.afterHoursMessage || "").trim()
+    );
+    setWorkflowAfterHoursWorkflowId(
+      workflowResources?.afterHoursWorkflowId || null
+    );
+  }, [
+    workflowResources?.businessTimeZone,
+    workflowResources?.businessHours,
+    workflowResources?.afterHoursMode,
+    workflowResources?.afterHoursMessage,
+    workflowResources?.afterHoursWorkflowId,
+    tenantBusinessTimeZone,
+    tenantBusinessHours,
+  ]);
 
   const stripConfigNodesFromGraph = (
     inputNodes: WorkflowNode[],
@@ -3002,12 +3303,42 @@ const Workflows: React.FC = () => {
 
             {/* Right Sidebar: Node Properties (Conditional) */}
             {!selectedEdgeId && activeWorkflowConfigPanel && (
-              <div className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:w-80 md:shrink-0">
+              <div
+                className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:shrink-0 md:relative"
+                style={{
+                  width:
+                    window.innerWidth >= 768 ? `${sidebarWidth}px` : undefined,
+                }}
+              >
                 <div
                   className="absolute inset-0 bg-black/50 md:hidden"
                   onClick={() => setActiveWorkflowConfigPanel(null)}
                 />
-                <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-full md:w-80 md:max-w-none">
+
+                {/* Resize Handle (desktop) - anchored to sidebar border */}
+                <div
+                  className="hidden md:block absolute left-0 top-0 bottom-0 w-3 cursor-ew-resize z-[2000]"
+                  onMouseDown={handleResizeStart}
+                  onTouchStart={handleResizeStart}
+                  title="Drag to resize panel"
+                >
+                  {/* Chrome-style splitter: thin line + subtle grip */}
+                  <div className="absolute inset-y-0 left-0 w-px bg-slate-200" />
+                  <div className="absolute top-1/2 -translate-y-1/2 left-0.5 w-2.5 h-12 bg-white border border-slate-300 rounded shadow-sm flex items-center justify-center">
+                    <div className="flex flex-col gap-1">
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="relative right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 shadow-xl md:static md:h-full md:w-full md:max-w-none"
+                  style={{
+                    width: window.innerWidth >= 768 ? "100%" : undefined,
+                  }}
+                >
                   <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                       <Settings2 size={14} /> Workflow Configuration
@@ -3331,6 +3662,416 @@ const Workflows: React.FC = () => {
                         </p>
                       </div>
                     )}
+
+                    {activeWorkflowConfigPanel === "timeSettings" && (
+                      <div>
+                        <div className="flex items-center gap-3 mb-4">
+                          <div className="p-2 bg-slate-50 rounded-lg">
+                            <Clock size={18} className="text-slate-700" />
+                          </div>
+                          <div>
+                            <div className="text-sm font-bold text-slate-800">
+                              Time Settings
+                            </div>
+                            <div className="text-xs text-slate-400">
+                              Workflow-level timezone and business hours
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                          <div className="text-xs font-bold text-slate-600 uppercase">
+                            Current Behavior
+                          </div>
+                          <div className="mt-1 text-xs text-slate-600">
+                            {workflowResources.assignedAgent
+                              ? "Agent working hours/timezone apply when an agent is assigned."
+                              : "If enabled below, workflow overrides apply; otherwise organization settings apply."}
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div>
+                            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={workflowOverrideTimeZone}
+                                onChange={(e) =>
+                                  setWorkflowOverrideTimeZone(e.target.checked)
+                                }
+                                className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                              />
+                              <span className="font-medium">
+                                Override Time Zone
+                              </span>
+                            </label>
+
+                            <div className="mt-2">
+                              <select
+                                value={workflowTimeZoneDraft}
+                                onChange={(e) =>
+                                  setWorkflowTimeZoneDraft(e.target.value)
+                                }
+                                disabled={!workflowOverrideTimeZone}
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+                              >
+                                {getTimeZoneOptions(
+                                  tenantBusinessTimeZone ||
+                                    getDetectedTimeZone()
+                                ).map((tz) => (
+                                  <option key={tz} value={tz}>
+                                    {tz}
+                                  </option>
+                                ))}
+                              </select>
+                              {!workflowOverrideTimeZone && (
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  Using organization timezone:{" "}
+                                  {tenantBusinessTimeZone}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={workflowOverrideBusinessHours}
+                                onChange={(e) =>
+                                  setWorkflowOverrideBusinessHours(
+                                    e.target.checked
+                                  )
+                                }
+                                className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                              />
+                              <span className="font-medium">
+                                Override Business Hours
+                              </span>
+                            </label>
+
+                            <div className="mt-3 space-y-2">
+                              {(
+                                Object.keys(
+                                  workflowBusinessHoursDraft.days
+                                ) as BusinessHoursDayKey[]
+                              ).map((dayKey) => {
+                                const day =
+                                  workflowBusinessHoursDraft.days[dayKey];
+                                const label =
+                                  dayKey.charAt(0).toUpperCase() +
+                                  dayKey.slice(1);
+
+                                return (
+                                  <div
+                                    key={dayKey}
+                                    className="grid grid-cols-[84px_1fr] items-center gap-3 p-3 bg-white border border-slate-200 rounded-lg"
+                                  >
+                                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={Boolean(day.enabled)}
+                                        disabled={
+                                          !workflowOverrideBusinessHours
+                                        }
+                                        onChange={(e) => {
+                                          const next = {
+                                            ...workflowBusinessHoursDraft,
+                                            days: {
+                                              ...workflowBusinessHoursDraft.days,
+                                              [dayKey]: {
+                                                ...day,
+                                                enabled: e.target.checked,
+                                              },
+                                            },
+                                          };
+                                          setWorkflowBusinessHoursDraft(next);
+                                        }}
+                                        className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                                      />
+                                      <span className="w-10">{label}</span>
+                                    </label>
+
+                                    <div className="grid grid-cols-[1fr_auto] gap-2 min-w-0">
+                                      <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                          type="time"
+                                          value={day.start}
+                                          disabled={
+                                            !workflowOverrideBusinessHours
+                                          }
+                                          onChange={(e) => {
+                                            const next = {
+                                              ...workflowBusinessHoursDraft,
+                                              days: {
+                                                ...workflowBusinessHoursDraft.days,
+                                                [dayKey]: {
+                                                  ...day,
+                                                  start: e.target.value,
+                                                },
+                                              },
+                                            };
+                                            setWorkflowBusinessHoursDraft(next);
+                                          }}
+                                          className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-sm disabled:opacity-50"
+                                        />
+                                        <input
+                                          type="time"
+                                          value={day.end}
+                                          disabled={
+                                            !workflowOverrideBusinessHours
+                                          }
+                                          onChange={(e) => {
+                                            const next = {
+                                              ...workflowBusinessHoursDraft,
+                                              days: {
+                                                ...workflowBusinessHoursDraft.days,
+                                                [dayKey]: {
+                                                  ...day,
+                                                  end: e.target.value,
+                                                },
+                                              },
+                                            };
+                                            setWorkflowBusinessHoursDraft(next);
+                                          }}
+                                          className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-sm disabled:opacity-50"
+                                        />
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const next = {
+                                            ...workflowBusinessHoursDraft,
+                                            days: {
+                                              ...workflowBusinessHoursDraft.days,
+                                            },
+                                          };
+                                          // Copy current day's times to all other days
+                                          (
+                                            Object.keys(
+                                              next.days
+                                            ) as BusinessHoursDayKey[]
+                                          ).forEach((key) => {
+                                            if (key !== dayKey) {
+                                              next.days[key] = {
+                                                ...next.days[key],
+                                                start: day.start,
+                                                end: day.end,
+                                              };
+                                            }
+                                          });
+                                          setWorkflowBusinessHoursDraft(next);
+                                        }}
+                                        disabled={
+                                          !workflowOverrideBusinessHours
+                                        }
+                                        className="px-2 py-1.5 text-xs font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                                        title="Copy these times to all other days"
+                                      >
+                                        Copy
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {!workflowOverrideBusinessHours && (
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  Using organization business hours.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-3">
+                              After Hours Behavior
+                            </label>
+
+                            <div className="space-y-3">
+                              <label className="flex items-start gap-3 p-3 bg-white border border-slate-200 rounded-lg cursor-pointer hover:border-indigo-300 transition-colors">
+                                <input
+                                  type="radio"
+                                  name="afterHoursMode"
+                                  value="USE_ORG"
+                                  checked={workflowAfterHoursMode === "USE_ORG"}
+                                  onChange={(e) =>
+                                    setWorkflowAfterHoursMode(e.target.value)
+                                  }
+                                  className="mt-0.5 w-4 h-4 text-indigo-600 border-slate-300 focus:ring-indigo-500"
+                                />
+                                <div className="flex-1">
+                                  <div className="text-sm font-medium text-slate-900">
+                                    Use Organization Settings
+                                  </div>
+                                  <div className="text-xs text-slate-500 mt-0.5">
+                                    Follow the default after-hours configuration
+                                  </div>
+                                </div>
+                              </label>
+
+                              <label className="flex items-start gap-3 p-3 bg-white border border-slate-200 rounded-lg cursor-pointer hover:border-indigo-300 transition-colors">
+                                <input
+                                  type="radio"
+                                  name="afterHoursMode"
+                                  value="CUSTOM_VOICEMAIL"
+                                  checked={
+                                    workflowAfterHoursMode ===
+                                    "CUSTOM_VOICEMAIL"
+                                  }
+                                  onChange={(e) =>
+                                    setWorkflowAfterHoursMode(e.target.value)
+                                  }
+                                  className="mt-0.5 w-4 h-4 text-indigo-600 border-slate-300 focus:ring-indigo-500"
+                                />
+                                <div className="flex-1">
+                                  <div className="text-sm font-medium text-slate-900">
+                                    Custom Voicemail Message
+                                  </div>
+                                  <div className="text-xs text-slate-500 mt-0.5">
+                                    Play a custom message and take voicemail
+                                  </div>
+                                  {workflowAfterHoursMode ===
+                                    "CUSTOM_VOICEMAIL" && (
+                                    <textarea
+                                      value={workflowAfterHoursMessage}
+                                      onChange={(e) =>
+                                        setWorkflowAfterHoursMessage(
+                                          e.target.value
+                                        )
+                                      }
+                                      placeholder="e.g., We're currently closed. Please leave a message..."
+                                      className="mt-2 w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                      rows={3}
+                                    />
+                                  )}
+                                </div>
+                              </label>
+
+                              <label className="flex items-start gap-3 p-3 bg-white border border-slate-200 rounded-lg cursor-pointer hover:border-indigo-300 transition-colors">
+                                <input
+                                  type="radio"
+                                  name="afterHoursMode"
+                                  value="REDIRECT_WORKFLOW"
+                                  checked={
+                                    workflowAfterHoursMode ===
+                                    "REDIRECT_WORKFLOW"
+                                  }
+                                  onChange={(e) =>
+                                    setWorkflowAfterHoursMode(e.target.value)
+                                  }
+                                  className="mt-0.5 w-4 h-4 text-indigo-600 border-slate-300 focus:ring-indigo-500"
+                                />
+                                <div className="flex-1">
+                                  <div className="text-sm font-medium text-slate-900">
+                                    Redirect to Another Workflow
+                                  </div>
+                                  <div className="text-xs text-slate-500 mt-0.5">
+                                    Transfer to a different workflow (target
+                                    workflow's after-hours settings will be
+                                    ignored)
+                                  </div>
+                                  {workflowAfterHoursMode ===
+                                    "REDIRECT_WORKFLOW" && (
+                                    <>
+                                      <select
+                                        value={
+                                          workflowAfterHoursWorkflowId || ""
+                                        }
+                                        onChange={(e) =>
+                                          setWorkflowAfterHoursWorkflowId(
+                                            e.target.value || null
+                                          )
+                                        }
+                                        className="mt-2 w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                      >
+                                        <option value="">
+                                          Select a workflow...
+                                        </option>
+                                        {workflows
+                                          .filter(
+                                            (w) =>
+                                              w.id !== selectedWorkflowMeta?.id
+                                          )
+                                          .map((w) => {
+                                            const hasAfterHoursRedirect =
+                                              Boolean(
+                                                (w as any).afterHoursWorkflowId
+                                              );
+                                            const hasAfterHoursSettings =
+                                              (w as any).afterHoursMode &&
+                                              (w as any).afterHoursMode !==
+                                                "USE_ORG";
+
+                                            return (
+                                              <option
+                                                key={w.id}
+                                                value={w.id}
+                                                disabled={hasAfterHoursRedirect}
+                                              >
+                                                {w.name}
+                                                {hasAfterHoursRedirect
+                                                  ? " (⚠ has redirect - not allowed)"
+                                                  : ""}
+                                                {hasAfterHoursSettings &&
+                                                !hasAfterHoursRedirect
+                                                  ? " (⚠ has settings - will be ignored)"
+                                                  : ""}
+                                              </option>
+                                            );
+                                          })}
+                                      </select>
+                                      {workflowAfterHoursWorkflowId &&
+                                        workflows.find(
+                                          (w) =>
+                                            w.id ===
+                                              workflowAfterHoursWorkflowId &&
+                                            (w as any).afterHoursMode &&
+                                            (w as any).afterHoursMode !==
+                                              "USE_ORG"
+                                        ) && (
+                                          <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800">
+                                            <strong>Note:</strong> This workflow
+                                            has its own after-hours
+                                            configuration, but it will be
+                                            ignored when used as an after-hours
+                                            target.
+                                          </div>
+                                        )}
+                                    </>
+                                  )}
+                                </div>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div className="flex gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={saveWorkflowTimeSettings}
+                              disabled={savingTimeSettings}
+                              className="flex-1 px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              {savingTimeSettings ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={clearWorkflowTimeSettings}
+                              disabled={savingTimeSettings}
+                              className="px-3 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
+                              title="Clear workflow overrides"
+                            >
+                              Use org
+                            </button>
+                          </div>
+
+                          <p className="text-[10px] text-slate-400">
+                            If set, these values override organization time
+                            settings for this workflow.
+                          </p>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3338,7 +4079,7 @@ const Workflows: React.FC = () => {
 
             {selectedNode && !selectedEdgeId && (
               <div
-                className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:shrink-0"
+                className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto md:shrink-0 md:relative"
                 style={{
                   width:
                     window.innerWidth >= 768 ? `${sidebarWidth}px` : undefined,
@@ -3348,20 +4089,30 @@ const Workflows: React.FC = () => {
                   className="absolute inset-0 bg-black/50 md:hidden"
                   onClick={() => setSelectedNodeId(null)}
                 />
+
+                {/* Resize Handle (desktop) - anchored to sidebar border */}
                 <div
-                  className="absolute right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 animate-in slide-in-from-right duration-200 shadow-xl md:static md:h-full md:max-w-none"
+                  className="hidden md:block absolute left-0 top-0 bottom-0 w-3 cursor-ew-resize z-[2000]"
+                  onMouseDown={handleResizeStart}
+                  onTouchStart={handleResizeStart}
+                  title="Drag to resize panel"
+                >
+                  <div className="absolute inset-y-0 left-0 w-px bg-slate-200" />
+                  <div className="absolute top-1/2 -translate-y-1/2 left-0.5 w-2.5 h-12 bg-white border border-slate-300 rounded shadow-sm flex items-center justify-center">
+                    <div className="flex flex-col gap-1">
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                      <div className="w-0.5 h-0.5 bg-slate-400 rounded-full" />
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="relative right-0 top-0 h-full w-[90vw] max-w-sm bg-white border-l border-slate-200 flex flex-col z-40 shadow-xl md:static md:h-full md:w-full md:max-w-none"
                   style={{
                     width: window.innerWidth >= 768 ? "100%" : undefined,
                   }}
                 >
-                  {/* Resize Handle */}
-                  <div
-                    className="hidden md:block absolute left-0 top-0 bottom-0 w-1.5 -ml-1 cursor-ew-resize bg-slate-300 hover:bg-blue-500 active:bg-blue-600 transition-colors group"
-                    onMouseDown={handleResizeStart}
-                    style={{ zIndex: 50 }}
-                  >
-                    <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-slate-400 group-hover:bg-blue-600" />
-                  </div>
                   <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                       <Settings2 size={14} /> Node Properties

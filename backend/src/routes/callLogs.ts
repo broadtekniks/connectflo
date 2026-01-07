@@ -22,7 +22,7 @@ router.get("/", async (req, res) => {
         where,
         include: {
           customer: {
-            select: { id: true, name: true, email: true },
+            select: { id: true, name: true, email: true, phoneNumber: true },
           },
           phoneNumber: {
             select: { id: true, number: true },
@@ -52,7 +52,7 @@ router.get("/:id", async (req, res) => {
       where: { id, tenantId },
       include: {
         customer: {
-          select: { id: true, name: true, email: true },
+          select: { id: true, name: true, email: true, phoneNumber: true },
         },
         phoneNumber: {
           select: { id: true, number: true },

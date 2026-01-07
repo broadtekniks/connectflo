@@ -1,6 +1,9 @@
 import { Router, Request, Response } from "express";
+import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { authenticateToken, AuthRequest } from "../middleware/auth";
+import { isValidTimeZone } from "../services/agentSchedule";
+import { normalizeBusinessHoursConfig } from "../services/businessHours";
 
 const router = Router();
 
@@ -75,11 +78,216 @@ router.get(
           wi?.integration ? wi.integration : wi
         ),
         toneOfVoice: (workflow as any).toneOfVoice ?? null,
+        businessTimeZone: (workflow as any).businessTimeZone ?? null,
+        businessHours: (workflow as any).businessHours ?? null,
         callGroups,
       });
     } catch (error) {
       console.error("Error fetching workflow resources:", error);
       res.status(500).json({ error: "Failed to fetch resources" });
+    }
+  }
+);
+
+// Update workflow-level time settings override (businessTimeZone + businessHours)
+router.put(
+  "/:id/time-settings",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+
+    const rawTz =
+      req.body?.businessTimeZone === null
+        ? null
+        : typeof req.body?.businessTimeZone === "string"
+        ? req.body.businessTimeZone
+        : undefined;
+
+    const rawHours =
+      req.body?.businessHours === null
+        ? null
+        : req.body?.businessHours !== undefined
+        ? req.body.businessHours
+        : undefined;
+
+    const afterHoursMode =
+      req.body?.afterHoursMode === null
+        ? null
+        : typeof req.body?.afterHoursMode === "string"
+        ? req.body.afterHoursMode
+        : undefined;
+
+    const afterHoursMessage =
+      req.body?.afterHoursMessage === null
+        ? null
+        : typeof req.body?.afterHoursMessage === "string"
+        ? req.body.afterHoursMessage
+        : undefined;
+
+    const afterHoursWorkflowId =
+      req.body?.afterHoursWorkflowId === null
+        ? null
+        : typeof req.body?.afterHoursWorkflowId === "string"
+        ? req.body.afterHoursWorkflowId
+        : undefined;
+
+    try {
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
+      });
+
+      if (!workflow) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      let nextTz: string | null | undefined = undefined;
+      if (rawTz !== undefined) {
+        const tz = (rawTz || "").trim();
+        if (!tz) {
+          nextTz = null;
+        } else {
+          if (!isValidTimeZone(tz)) {
+            return res.status(400).json({ error: "Invalid time zone" });
+          }
+          nextTz = tz;
+        }
+      }
+
+      let nextHours: any | null | undefined = undefined;
+      if (rawHours !== undefined) {
+        if (rawHours === null) {
+          nextHours = null;
+        } else {
+          nextHours = normalizeBusinessHoursConfig(rawHours as any);
+        }
+      }
+
+      // Validate afterHoursWorkflowId to prevent circular references
+      if (afterHoursWorkflowId && afterHoursWorkflowId !== null) {
+        // Check if target workflow exists and belongs to same tenant
+        const targetWorkflow = await prisma.workflow.findFirst({
+          where: {
+            id: afterHoursWorkflowId,
+            tenantId: authReq.user?.tenantId,
+          },
+          select: {
+            id: true,
+            afterHoursWorkflowId: true,
+          },
+        });
+
+        if (!targetWorkflow) {
+          return res.status(400).json({
+            error: "Target workflow not found or unauthorized",
+          });
+        }
+
+        // Check for direct circular reference (A -> A)
+        if (afterHoursWorkflowId === workflowId) {
+          return res.status(400).json({
+            error: "Workflow cannot redirect to itself after hours",
+          });
+        }
+
+        // Check for indirect circular reference (A -> B -> A)
+        if (targetWorkflow.afterHoursWorkflowId === workflowId) {
+          return res.status(400).json({
+            error:
+              "Circular after-hours redirect detected. The target workflow redirects back to this workflow.",
+          });
+        }
+
+        // Check for chain depth (prevent A -> B -> C)
+        if (targetWorkflow.afterHoursWorkflowId) {
+          return res.status(400).json({
+            error:
+              "The target workflow already redirects to another workflow. Chained redirects are not allowed.",
+          });
+        }
+      }
+
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        data: {
+          ...(nextTz !== undefined ? { businessTimeZone: nextTz } : {}),
+          ...(nextHours !== undefined
+            ? { businessHours: nextHours === null ? Prisma.DbNull : nextHours }
+            : {}),
+          ...(afterHoursMode !== undefined ? { afterHoursMode } : {}),
+          ...(afterHoursMessage !== undefined ? { afterHoursMessage } : {}),
+          ...(afterHoursWorkflowId !== undefined
+            ? { afterHoursWorkflowId }
+            : {}),
+        },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: {
+          id: true,
+          businessTimeZone: true,
+          businessHours: true,
+          afterHoursMode: true,
+          afterHoursMessage: true,
+          afterHoursWorkflowId: true,
+        },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating workflow time settings override:", error);
+      res.status(500).json({ error: "Failed to update time settings" });
+    }
+  }
+);
+
+// Clear workflow-level time settings override
+router.delete(
+  "/:id/time-settings",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const workflowId = req.params.id;
+
+    try {
+      const workflow = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: { id: true },
+      });
+
+      if (!workflow) {
+        return res.status(403).json({ error: "Unauthorized" });
+      }
+
+      await prisma.workflow.updateMany({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        data: {
+          businessTimeZone: null,
+          businessHours: Prisma.DbNull,
+          afterHoursMode: null,
+          afterHoursMessage: null,
+          afterHoursWorkflowId: null,
+        },
+      });
+
+      const updated = await prisma.workflow.findFirst({
+        where: { id: workflowId, tenantId: authReq.user?.tenantId },
+        select: {
+          id: true,
+          businessTimeZone: true,
+          businessHours: true,
+          afterHoursMode: true,
+          afterHoursMessage: true,
+          afterHoursWorkflowId: true,
+        },
+      });
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Error clearing workflow time settings override:", error);
+      res.status(500).json({ error: "Failed to clear time settings" });
     }
   }
 );

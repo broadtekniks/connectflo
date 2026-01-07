@@ -172,6 +172,12 @@ io.on("connection", (socket) => {
     ((socket.data.user as any)?.id as string | undefined) ??
     ((socket.data.user as any)?.userId as string | undefined);
 
+  // Auto-join tenant room for tenant-wide broadcasts (e.g., new voicemails, SMS)
+  if (tenantId) {
+    socket.join(`tenant_${tenantId}`);
+    console.log(`User ${socket.id} joined tenant room: tenant_${tenantId}`);
+  }
+
   socket.on("webphone:set_ready", () => {
     if (!tenantId || !userId) return;
     setWebPhoneReady({ tenantId, userId, ready: true });

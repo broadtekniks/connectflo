@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { WorkflowEngine } from "../services/workflowEngine";
 import { TelnyxService } from "../services/telnyx";
 import { hybridVoiceService } from "../services/hybridVoice";
+import { isTenantOpenNow } from "../services/businessHours";
 import prisma from "../lib/prisma";
 
 const router = Router();
@@ -254,7 +255,31 @@ router.post("/telnyx", async (req: Request, res: Response) => {
         raw: payload,
       };
 
-      await workflowEngine.trigger("Incoming Message", workflowContext);
+      const result = await workflowEngine.trigger(
+        "Incoming Message",
+        workflowContext
+      );
+
+      if (
+        result?.status === "skipped" &&
+        result.reason === "after_hours" &&
+        result.afterHours?.shouldReply &&
+        result.afterHours.text
+      ) {
+        try {
+          // Telnyx inbound: toNumber is our number, fromNumber is the customer.
+          await telnyxService.sendTestSMS(
+            toNumber,
+            fromNumber,
+            result.afterHours.text
+          );
+        } catch (err) {
+          console.warn(
+            "[Webhook/Telnyx] Failed to send after-hours SMS reply:",
+            err
+          );
+        }
+      }
     } else if (eventType === "call.initiated") {
       // Handle incoming call based on feature flag
       if (USE_STREAMING_VOICE) {
@@ -262,14 +287,77 @@ router.post("/telnyx", async (req: Request, res: Response) => {
         await handleHybridCall(payload);
       } else {
         // LEGACY: Use traditional TTS/STT workflow
-        await workflowEngine.trigger("Incoming Call", {
+        const toNumber = String(payload.to || "").trim();
+        const phoneNumber = toNumber
+          ? await prisma.phoneNumber.findUnique({
+              where: { number: toNumber },
+              select: {
+                id: true,
+                tenantId: true,
+                afterHoursMessage: true,
+              },
+            })
+          : null;
+
+        const tenant = phoneNumber?.tenantId
+          ? await prisma.tenant.findUnique({
+              where: { id: phoneNumber.tenantId },
+              select: { businessTimeZone: true, businessHours: true },
+            })
+          : null;
+
+        const result = await workflowEngine.trigger("Incoming Call", {
           type: "voice",
           callControlId: payload.call_control_id,
           fromNumber: payload.from,
           toNumber: payload.to,
           direction: payload.direction,
           raw: payload,
+          tenantId: phoneNumber?.tenantId,
+          trigger: {
+            type: "Incoming Call",
+            source: "telnyx",
+            phoneNumberId: phoneNumber?.id,
+            phoneNumber: toNumber,
+          },
         });
+
+        // Fallback behavior when no Incoming Call workflow is configured.
+        if (result?.status === "no_workflow") {
+          try {
+            await telnyxService.answerCall(payload.call_control_id);
+            const closedText =
+              String(phoneNumber?.afterHoursMessage || "").trim() ||
+              "Thanks for calling. We're currently closed. Please call back during business hours.";
+            const openText =
+              "Thanks for calling. This line is not configured yet.";
+
+            const isOpenNow = tenant
+              ? isTenantOpenNow({
+                  tenant: {
+                    timeZone: (tenant as any)?.businessTimeZone,
+                    businessHours: (tenant as any)?.businessHours,
+                  },
+                })
+              : true;
+
+            await telnyxService.speakText(
+              payload.call_control_id,
+              isOpenNow ? openText : closedText
+            );
+          } catch (err) {
+            console.warn(
+              "[Webhook/Telnyx] Fallback voice response failed:",
+              err
+            );
+          }
+
+          try {
+            await telnyxService.hangupCall(payload.call_control_id);
+          } catch {
+            // ignore
+          }
+        }
       }
     } else if (eventType === "call.speak.ended") {
       // When TTS finishes speaking

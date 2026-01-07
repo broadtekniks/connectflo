@@ -116,8 +116,7 @@ export interface PhoneNumber {
     email: string;
   };
 
-  afterHoursMode?: "VOICEMAIL" | "AI_WORKFLOW";
-  afterHoursWorkflowId?: string | null;
+  afterHoursMode?: "VOICEMAIL";
   afterHoursMessage?: string | null;
   afterHoursNotifyUserId?: string | null;
 }
@@ -165,4 +164,6 @@ export interface Workflow {
   edges: WorkflowEdge[];
   phoneVoiceId?: string | null;
   phoneVoiceLanguage?: string | null;
+  businessTimeZone?: string | null;
+  businessHours?: any | null;
 }

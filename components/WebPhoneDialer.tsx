@@ -1505,73 +1505,77 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
                         ) : (
                           <div className="space-y-1">
                             {recents.slice(0, 6).map((r) => {
-                            const isMissed = r.status === "missed";
-                            const dirIcon =
-                              r.direction === "out" ? (
-                                <ArrowUpRight
-                                  size={18}
-                                  className={
-                                    isMissed ? "text-red-600" : "text-green-600"
-                                  }
-                                />
-                              ) : (
-                                <ArrowDownLeft
-                                  size={18}
-                                  className={
-                                    isMissed ? "text-red-600" : "text-green-600"
-                                  }
-                                />
-                              );
+                              const isMissed = r.status === "missed";
+                              const dirIcon =
+                                r.direction === "out" ? (
+                                  <ArrowUpRight
+                                    size={18}
+                                    className={
+                                      isMissed
+                                        ? "text-red-600"
+                                        : "text-green-600"
+                                    }
+                                  />
+                                ) : (
+                                  <ArrowDownLeft
+                                    size={18}
+                                    className={
+                                      isMissed
+                                        ? "text-red-600"
+                                        : "text-green-600"
+                                    }
+                                  />
+                                );
 
-                            const subtitleParts: string[] = [];
-                            if (
-                              r.durationSec !== undefined &&
-                              r.durationSec > 0
-                            ) {
-                              const mins = Math.floor(r.durationSec / 60);
-                              const secs = r.durationSec % 60;
-                              subtitleParts.push(
-                                mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
-                              );
-                            }
-                            subtitleParts.push(formatRelativeTime(r.at));
+                              const subtitleParts: string[] = [];
+                              if (
+                                r.durationSec !== undefined &&
+                                r.durationSec > 0
+                              ) {
+                                const mins = Math.floor(r.durationSec / 60);
+                                const secs = r.durationSec % 60;
+                                subtitleParts.push(
+                                  mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+                                );
+                              }
+                              subtitleParts.push(formatRelativeTime(r.at));
 
-                            return (
-                              <button
-                                key={r.id}
-                                type="button"
-                                onClick={() =>
-                                  setDialTo(dialTargetFromRecent(r.number))
-                                }
-                                className="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-slate-50 text-left"
-                              >
-                                <div className="shrink-0">{dirIcon}</div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="text-sm font-semibold text-slate-800 truncate">
-                                    {formatCaller(r.number)}
+                              return (
+                                <button
+                                  key={r.id}
+                                  type="button"
+                                  onClick={() =>
+                                    setDialTo(dialTargetFromRecent(r.number))
+                                  }
+                                  className="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-slate-50 text-left"
+                                >
+                                  <div className="shrink-0">{dirIcon}</div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-semibold text-slate-800 truncate">
+                                      {formatCaller(r.number)}
+                                    </div>
+                                    <div className="text-xs text-slate-500">
+                                      {isMissed
+                                        ? "Missed"
+                                        : r.status === "declined"
+                                        ? "Declined"
+                                        : r.status === "failed"
+                                        ? "Failed"
+                                        : ""}
+                                      {isMissed ||
+                                      r.status === "declined" ||
+                                      r.status === "failed"
+                                        ? " · "
+                                        : ""}
+                                      {subtitleParts.join(" · ")}
+                                    </div>
                                   </div>
-                                  <div className="text-xs text-slate-500">
-                                    {isMissed
-                                      ? "Missed"
-                                      : r.status === "declined"
-                                      ? "Declined"
-                                      : r.status === "failed"
-                                      ? "Failed"
-                                      : ""}
-                                    {isMissed ||
-                                    r.status === "declined" ||
-                                    r.status === "failed"
-                                      ? " · "
-                                      : ""}
-                                    {subtitleParts.join(" · ")}
+                                  <div className="shrink-0 text-slate-400 text-xs">
+                                    Tap to dial
                                   </div>
-                                </div>
-                                <div className="shrink-0 text-slate-400 text-xs">
-                                  Tap to dial
-                                </div>
-                              </button>
-                            );
-                          })}
+                                </button>
+                              );
+                            })}
                           </div>
                         )
                       ) : directoryEntries.length === 0 ? (
@@ -1580,49 +1584,49 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
                         </div>
                       ) : (
                         <div className="space-y-1">
-                          {directoryEntries.slice(0, 25).map((e) => (
+                          {directoryEntries.slice(0, 25).map((e) =>
                             (() => {
                               const s = String(e.status || "").toUpperCase();
                               const dotClass =
                                 s === "ONLINE"
                                   ? "bg-green-500"
                                   : s === "BUSY"
-                                    ? "bg-amber-500"
-                                    : "bg-slate-300";
+                                  ? "bg-amber-500"
+                                  : "bg-slate-300";
                               const statusLabel =
                                 s === "ONLINE"
                                   ? "Online"
                                   : s === "BUSY"
-                                    ? "Busy"
-                                    : "Offline";
+                                  ? "Busy"
+                                  : "Offline";
 
                               return (
-                            <button
-                              key={e.userId}
-                              type="button"
-                              onClick={() => setDialTo(e.extension)}
-                              className="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-slate-50 text-left"
-                            >
-                              <div className="shrink-0">
-                                <div
-                                  className={`w-2.5 h-2.5 rounded-full ${dotClass}`}
-                                  aria-label={statusLabel}
-                                  title={statusLabel}
-                                />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="text-sm font-semibold text-slate-800 truncate">
-                                  Ext. {e.extension}
-                                  {e.name ? ` (${e.name})` : ""}
-                                </div>
-                                <div className="text-xs text-slate-500">
-                                  {statusLabel} · Tap to dial
-                                </div>
-                              </div>
-                            </button>
+                                <button
+                                  key={e.userId}
+                                  type="button"
+                                  onClick={() => setDialTo(e.extension)}
+                                  className="w-full flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-slate-50 text-left"
+                                >
+                                  <div className="shrink-0">
+                                    <div
+                                      className={`w-2.5 h-2.5 rounded-full ${dotClass}`}
+                                      aria-label={statusLabel}
+                                      title={statusLabel}
+                                    />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-semibold text-slate-800 truncate">
+                                      Ext. {e.extension}
+                                      {e.name ? ` (${e.name})` : ""}
+                                    </div>
+                                    <div className="text-xs text-slate-500">
+                                      {statusLabel} · Tap to dial
+                                    </div>
+                                  </div>
+                                </button>
                               );
                             })()
-                          ))}
+                          )}
                         </div>
                       )}
                     </div>

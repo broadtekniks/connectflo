@@ -864,6 +864,38 @@ export const api = {
     updateAfterHours: async (
       numberId: string,
       data: {
+        afterHoursMessage: string | null;
+        afterHoursNotifyUserId: string | null;
+      }
+    ): Promise<PhoneNumber> => {
+      const response = await fetch(
+        `${API_URL}/phone-numbers/${numberId}/after-hours`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+          body: JSON.stringify({
+            // Backward compatible payload: server enforces voicemail-only.
+            afterHoursMode: "VOICEMAIL",
+            afterHoursWorkflowId: null,
+            afterHoursMessage: data.afterHoursMessage,
+            afterHoursNotifyUserId: data.afterHoursNotifyUserId,
+          }),
+        }
+      );
+      if (!response.ok)
+        throw new Error("Failed to update after-hours settings");
+      return response.json();
+    },
+
+    /*
+     * Backward-compat note:
+     * Older clients may still send afterHoursWorkflowId/mode; the server ignores them.
+     */
+
+    /*
+    updateAfterHours: async (
+      numberId: string,
+      data: {
         afterHoursMode: "VOICEMAIL" | "AI_WORKFLOW";
         afterHoursWorkflowId: string | null;
         afterHoursMessage: string | null;
@@ -882,6 +914,7 @@ export const api = {
         throw new Error("Failed to update after-hours settings");
       return response.json();
     },
+    */
     unassign: async (numberId: string): Promise<PhoneNumber> => {
       const response = await fetch(
         `${API_URL}/phone-numbers/${numberId}/unassign`,
@@ -1472,7 +1505,7 @@ export const api = {
           id: string;
           name: string;
           email: string;
-          phone: string;
+          phoneNumber: string;
         };
         phoneNumber?: {
           id: string;

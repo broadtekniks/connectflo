@@ -1,19 +1,25 @@
 import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { WorkflowEngine } from "../services/workflowEngine";
+import { TelnyxService } from "../services/telnyx";
 
 const router = Router();
+const workflowEngine = new WorkflowEngine();
+const telnyxService = new TelnyxService();
+
+function escapeXml(input: string): string {
+  return String(input)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
 
 // Twilio SMS Webhook
 router.post("/twilio/sms", async (req: Request, res: Response) => {
   try {
-    const {
-      MessageSid,
-      From,
-      To,
-      Body,
-      NumMedia,
-      MediaUrl0,
-    } = req.body;
+    const { MessageSid, From, To, Body, NumMedia, MediaUrl0 } = req.body;
 
     console.log("[SMS] Received from", From, "to", To, ":", Body);
 
@@ -208,7 +214,75 @@ router.post("/twilio/sms", async (req: Request, res: Response) => {
       }
     }
 
-    res
+    const workflowContext = {
+      trigger: {
+        type: "Incoming Message",
+        source: "twilio",
+        phoneNumberId: phoneNumber.id,
+        phoneNumber: To,
+      },
+      customer: customer
+        ? {
+            id: customer.id,
+            name: customer.name || undefined,
+            email: customer.email || undefined,
+            phone: From,
+            metadata: {},
+          }
+        : { phone: From, metadata: {} },
+      conversation: conversation
+        ? {
+            id: conversation.id,
+            channel: conversation.channel,
+            status: conversation.status,
+            assignedToId: conversation.assigneeId || undefined,
+            subject: conversation.subject || undefined,
+            metadata: {},
+          }
+        : { metadata: {} },
+      message: {
+        from: From,
+        to: To,
+        text: Body,
+        direction: "inbound",
+        timestamp: new Date().toISOString(),
+        sid: MessageSid,
+      },
+      tenant: {
+        id: phoneNumber.tenantId,
+        name: phoneNumber?.tenant?.name,
+      },
+      // legacy fields
+      tenantId: phoneNumber.tenantId,
+      type: "sms",
+      fromNumber: From,
+      toNumber: To,
+      text: Body,
+      Body,
+      MessageSid,
+    };
+
+    const result = await workflowEngine.trigger(
+      "Incoming Message",
+      workflowContext
+    );
+
+    if (
+      result?.status === "skipped" &&
+      result.reason === "after_hours" &&
+      result.afterHours?.shouldReply &&
+      result.afterHours.text
+    ) {
+      const msg = escapeXml(result.afterHours.text);
+      return res
+        .status(200)
+        .type("text/xml")
+        .send(
+          `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Message>${msg}</Message></Response>`
+        );
+    }
+
+    return res
       .status(200)
       .type("text/xml")
       .send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
@@ -222,7 +296,7 @@ router.post("/twilio/sms", async (req: Request, res: Response) => {
 router.post("/telnyx/sms", async (req: Request, res: Response) => {
   try {
     const { data } = req.body;
-    
+
     if (!data || data.event_type !== "message.received") {
       return res.status(200).json({ status: "ignored" });
     }
@@ -263,7 +337,14 @@ router.post("/telnyx/sms", async (req: Request, res: Response) => {
 
     // Handle STOP/START keywords
     const normalizedBody = Body.trim().toUpperCase();
-    const stopKeywords = ["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"];
+    const stopKeywords = [
+      "STOP",
+      "STOPALL",
+      "UNSUBSCRIBE",
+      "CANCEL",
+      "END",
+      "QUIT",
+    ];
     const startKeywords = ["START", "YES", "UNSTOP"];
 
     if (stopKeywords.includes(normalizedBody)) {
@@ -381,6 +462,69 @@ router.post("/telnyx/sms", async (req: Request, res: Response) => {
           where: { id: conversation.id },
           data: { assigneeId: checkedInAgent.id },
         });
+      }
+    }
+
+    const workflowContext = {
+      trigger: {
+        type: "Incoming Message",
+        source: "telnyx",
+        phoneNumberId: phoneNumber.id,
+        phoneNumber: To,
+      },
+      customer: customer
+        ? {
+            id: customer.id,
+            name: customer.name || undefined,
+            email: customer.email || undefined,
+            phone: From,
+            metadata: {},
+          }
+        : { phone: From, metadata: {} },
+      conversation: conversation
+        ? {
+            id: conversation.id,
+            channel: conversation.channel,
+            status: conversation.status,
+            assignedToId: conversation.assigneeId || undefined,
+            subject: conversation.subject || undefined,
+            metadata: {},
+          }
+        : { metadata: {} },
+      message: {
+        from: From,
+        to: To,
+        text: Body,
+        direction: "inbound",
+        timestamp: new Date().toISOString(),
+      },
+      tenant: {
+        id: phoneNumber.tenantId,
+        name: phoneNumber?.tenant?.name,
+      },
+      // legacy fields
+      tenantId: phoneNumber.tenantId,
+      type: "sms",
+      fromNumber: From,
+      toNumber: To,
+      text: Body,
+    };
+
+    const result = await workflowEngine.trigger(
+      "Incoming Message",
+      workflowContext
+    );
+
+    if (
+      result?.status === "skipped" &&
+      result.reason === "after_hours" &&
+      result.afterHours?.shouldReply &&
+      result.afterHours.text
+    ) {
+      try {
+        await telnyxService.sendTestSMS(To, From, result.afterHours.text);
+      } catch (err) {
+        console.warn("[SMS/Telnyx] Failed to send after-hours reply:", err);
       }
     }
 

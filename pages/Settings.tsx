@@ -1316,17 +1316,45 @@ const Settings: React.FC = () => {
     },
   ];
 
-  const tabs = allTabs.filter((t) =>
+  // Keep these tabs available via Telephony sidebar deep-links
+  // (Settings page should not show duplicate menu items).
+  const hiddenFromSettingsMenu = new Set(["web-phone", "extensions"]);
+
+  const allowedTabs = allTabs.filter((t) =>
     t.roles.includes((user?.role || "AGENT") as any)
   );
 
+  const navTabs = allowedTabs.filter((t) => !hiddenFromSettingsMenu.has(t.id));
+
+  useEffect(() => {
+    const applyHashTab = () => {
+      try {
+        const raw = String(window.location.hash || "");
+        const hash = raw.startsWith("#") ? raw.slice(1) : raw;
+        const tabId = decodeURIComponent(hash || "").trim();
+        if (!tabId) return;
+
+        const allowed = new Set(allowedTabs.map((t) => t.id));
+        if (allowed.has(tabId)) {
+          setActiveTab(tabId);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    applyHashTab();
+    window.addEventListener("hashchange", applyHashTab);
+    return () => window.removeEventListener("hashchange", applyHashTab);
+  }, [allowedTabs]);
+
   useEffect(() => {
     if (!user) return;
-    const allowedIds = new Set(tabs.map((t) => t.id));
+    const allowedIds = new Set(allowedTabs.map((t) => t.id));
     if (!allowedIds.has(activeTab)) {
-      setActiveTab(tabs[0]?.id || "general");
+      setActiveTab(allowedTabs[0]?.id || "general");
     }
-  }, [user, activeTab, tabs]);
+  }, [user, activeTab, allowedTabs]);
 
   return (
     <div className="flex-1 bg-slate-50 h-full flex overflow-hidden">
@@ -1337,7 +1365,7 @@ const Settings: React.FC = () => {
           <p className="text-xs text-slate-500 mt-1">Manage workspace & AI</p>
         </div>
         <nav className="flex-1 px-3 space-y-1">
-          {tabs.map((tab) => (
+          {navTabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}

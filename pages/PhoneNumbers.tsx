@@ -68,16 +68,12 @@ const PhoneNumbers: React.FC = () => {
   const [showFlowModal, setShowFlowModal] = useState(false);
   const [selectedNumberForFlow, setSelectedNumberForFlow] =
     useState<PhoneNumber | null>(null);
-  const [afterHoursMode, setAfterHoursMode] = useState<
-    "VOICEMAIL" | "AI_WORKFLOW"
-  >("VOICEMAIL");
-  const [afterHoursWorkflowId, setAfterHoursWorkflowId] = useState<string>("");
+  const [afterHoursMode, setAfterHoursMode] = useState<"VOICEMAIL">("VOICEMAIL");
   const [afterHoursMessage, setAfterHoursMessage] = useState<string>(
     "Thanks for calling. We're currently closed. Please leave a message after the beep."
   );
   const [afterHoursNotifyUserId, setAfterHoursNotifyUserId] =
     useState<string>("");
-  const [incomingCallWorkflows, setIncomingCallWorkflows] = useState<any[]>([]);
   const [notifyUsers, setNotifyUsers] = useState<
     Array<{ id: string; name: string | null; email: string }>
   >([]);
@@ -115,34 +111,22 @@ const PhoneNumbers: React.FC = () => {
   useEffect(() => {
     if (!showFlowModal) return;
 
-    Promise.allSettled([api.workflows.list(), api.teamMembers.list()]).then(
-      (results) => {
-        const wfRes = results[0];
-        const tmRes = results[1];
-
-        if (wfRes.status === "fulfilled") {
-          const wfs = (wfRes.value || []).filter(
-            (w: any) => w?.triggerType === "Incoming Call" && w?.isActive
-          );
-          setIncomingCallWorkflows(wfs);
-        }
-
-        if (tmRes.status === "fulfilled") {
-          const users = (tmRes.value || [])
-            .filter(
-              (u: any) => u?.role === "AGENT" || u?.role === "TENANT_ADMIN"
-            )
-            .map((u: any) => ({ id: u.id, name: u.name, email: u.email }));
-          setNotifyUsers(users);
-        }
-      }
-    );
+    api.teamMembers
+      .list()
+      .then((teamMembers) => {
+        const users = (teamMembers || [])
+          .filter((u: any) => u?.role === "AGENT" || u?.role === "TENANT_ADMIN")
+          .map((u: any) => ({ id: u.id, name: u.name, email: u.email }));
+        setNotifyUsers(users);
+      })
+      .catch(() => {
+        // Non-blocking: modal can still be used without notify list.
+      });
   }, [showFlowModal]);
 
   const openFlowModal = (num: PhoneNumber) => {
     setSelectedNumberForFlow(num);
-    setAfterHoursMode((num.afterHoursMode as any) || "VOICEMAIL");
-    setAfterHoursWorkflowId(String(num.afterHoursWorkflowId || ""));
+    setAfterHoursMode("VOICEMAIL");
     setAfterHoursMessage(
       String(
         num.afterHoursMessage ||
@@ -161,11 +145,6 @@ const PhoneNumbers: React.FC = () => {
       const updated = await api.phoneNumbers.updateAfterHours(
         selectedNumberForFlow.id,
         {
-          afterHoursMode,
-          afterHoursWorkflowId:
-            afterHoursMode === "AI_WORKFLOW"
-              ? afterHoursWorkflowId || null
-              : null,
           afterHoursMessage: afterHoursMessage.trim() || null,
           afterHoursNotifyUserId: afterHoursNotifyUserId || null,
         }
@@ -1259,38 +1238,12 @@ const PhoneNumbers: React.FC = () => {
                 </label>
                 <select
                   value={afterHoursMode}
-                  onChange={(e) =>
-                    setAfterHoursMode(
-                      e.target.value as "VOICEMAIL" | "AI_WORKFLOW"
-                    )
-                  }
+                  onChange={() => setAfterHoursMode("VOICEMAIL")}
                   className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-white"
+                  disabled
                 >
                   <option value="VOICEMAIL">Voicemail</option>
-                  <option value="AI_WORKFLOW">After-hours workflow</option>
                 </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
-                  After-hours workflow
-                </label>
-                <select
-                  value={afterHoursWorkflowId}
-                  onChange={(e) => setAfterHoursWorkflowId(e.target.value)}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg bg-white"
-                  disabled={afterHoursMode !== "AI_WORKFLOW"}
-                >
-                  <option value="">Select a workflow…</option>
-                  {incomingCallWorkflows.map((wf) => (
-                    <option key={wf.id} value={wf.id}>
-                      {wf.name}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-slate-500 mt-1">
-                  Used only when after-hours behavior is set to workflow.
-                </p>
               </div>
 
               <div>

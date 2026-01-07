@@ -608,8 +608,6 @@ router.post("/voice", async (req: Request, res: Response) => {
         id: true,
         number: true,
         tenantId: true,
-        afterHoursMode: true,
-        afterHoursWorkflowId: true,
         afterHoursMessage: true,
         afterHoursNotifyUserId: true,
       },
@@ -635,113 +633,32 @@ router.post("/voice", async (req: Request, res: Response) => {
       select: { name: true, businessTimeZone: true, businessHours: true },
     });
 
-    const isOpenNow = isTenantOpenNow({
-      tenant: {
-        timeZone: (tenant as any)?.businessTimeZone,
-        businessHours: (tenant as any)?.businessHours,
-      },
-    });
-
-    const afterHoursMode = String(phoneNumber.afterHoursMode || "VOICEMAIL")
-      .trim()
-      .toUpperCase();
-
-    // After-hours short-circuit BEFORE starting Realtime streaming.
-    if (!isOpenNow) {
-      // Option A: route to an after-hours Incoming Call workflow.
-      if (
-        afterHoursMode === "AI_WORKFLOW" &&
-        phoneNumber.afterHoursWorkflowId
-      ) {
-        const workflow = await prisma.workflow.findFirst({
-          where: {
-            id: phoneNumber.afterHoursWorkflowId,
-            tenantId: phoneNumber.tenantId,
-            isActive: true,
-            triggerType: "Incoming Call",
-          },
-          include: {
-            aiConfig: true,
-            documents: { include: { document: true } },
-            assignedAgent: {
-              select: {
-                id: true,
-                name: true,
-                agentTimeZone: true,
-                workingHours: true,
-              },
-            },
-          } as any,
-        });
-
-        if (!workflow) {
-          console.warn(
-            `[Twilio] After-hours workflow ${phoneNumber.afterHoursWorkflowId} not found/active. Falling back to voicemail.`
-          );
-        } else {
-          // Reuse the normal workflow path below.
-          (req as any).__afterHoursWorkflow = workflow;
-        }
-      }
-
-      // Option B: voicemail
-      if (!(req as any).__afterHoursWorkflow) {
-        const callbackUrl =
-          deriveVoicemailCallbackUrl() ||
-          `${req.protocol}://${req.get("host")}${req.baseUrl}/voicemail`;
-        const maxLength = 120;
-        const sayText =
-          normalizeTwilioSayText(phoneNumber.afterHoursMessage || "") ||
-          "Thanks for calling. We're currently closed. Please leave a message after the beep.";
-
-        res.type("text/xml");
-        const actionAttr = callbackUrl
-          ? ` action="${escapeXml(callbackUrl)}?phoneNumberId=${escapeXml(
-              phoneNumber.id
-            )}" method="POST"`
-          : "";
-
-        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>${escapeXml(sayText)}</Say>
-  <Record${actionAttr} maxLength="${maxLength}" playBeep="true" />
-  <Say>Thank you. Goodbye.</Say>
-  <Hangup/>
-</Response>`;
-        console.log(`[Twilio] After-hours voicemail TwiML:`, twiml);
-        res.send(twiml);
-        return;
-      }
-    }
-
     // Select workflow based on the workflow canvas trigger configuration.
     // In the UI, Incoming Call trigger stores config.phoneNumberId (or empty for Any/All).
-    const candidateWorkflows = (req as any).__afterHoursWorkflow
-      ? []
-      : await prisma.workflow.findMany({
-          where: {
-            tenantId: phoneNumber.tenantId,
-            isActive: true,
-            triggerType: "Incoming Call",
-          },
+    const candidateWorkflows = await prisma.workflow.findMany({
+      where: {
+        tenantId: phoneNumber.tenantId,
+        isActive: true,
+        triggerType: "Incoming Call",
+      },
+      include: {
+        aiConfig: true,
+        documents: {
           include: {
-            aiConfig: true,
-            documents: {
-              include: {
-                document: true,
-              },
-            },
-            assignedAgent: {
-              select: {
-                id: true,
-                name: true,
-                agentTimeZone: true,
-                workingHours: true,
-              },
-            },
-          } as any,
-          orderBy: { updatedAt: "desc" },
-        });
+            document: true,
+          },
+        },
+        assignedAgent: {
+          select: {
+            id: true,
+            name: true,
+            agentTimeZone: true,
+            workingHours: true,
+          },
+        },
+      } as any,
+      orderBy: { updatedAt: "desc" },
+    });
 
     const extractIncomingCallTrigger = (nodesJson: unknown) => {
       const nodes = Array.isArray(nodesJson) ? (nodesJson as any[]) : [];
@@ -764,13 +681,158 @@ router.post("/voice", async (req: Request, res: Response) => {
       };
     };
 
-    const selectedWorkflow = (req as any).__afterHoursWorkflow
-      ? (req as any).__afterHoursWorkflow
-      : candidateWorkflows.find((wf) => {
-          const { phoneNumberId } = extractIncomingCallTrigger(wf.nodes);
-          if (!phoneNumberId) return true; // Any / All Numbers
-          return phoneNumberId === phoneNumber.id;
-        });
+    const normalWorkflow = candidateWorkflows.find((wf) => {
+      const { phoneNumberId } = extractIncomingCallTrigger(wf.nodes);
+      if (!phoneNumberId) return true; // Any / All Numbers
+      return phoneNumberId === phoneNumber.id;
+    });
+
+    const hasDaysObject = (raw: any): boolean => {
+      if (!raw || typeof raw !== "object") return false;
+      const days = (raw as any).days;
+      return Boolean(days && typeof days === "object");
+    };
+
+    const workflowHasHoursOverride = Boolean(
+      String(((normalWorkflow as any)?.businessTimeZone || "").trim()) ||
+        (hasDaysObject((normalWorkflow as any)?.businessHours) ? "1" : "")
+    );
+
+    const effectiveTimeZone =
+      String(((normalWorkflow as any)?.businessTimeZone || "").trim()) ||
+      String(((tenant as any)?.businessTimeZone || "").trim()) ||
+      "UTC";
+    const effectiveBusinessHoursRaw = hasDaysObject(
+      (normalWorkflow as any)?.businessHours
+    )
+      ? (normalWorkflow as any)?.businessHours
+      : (tenant as any)?.businessHours;
+
+    const isOpenNow = isTenantOpenNow({
+      tenant: {
+        timeZone: effectiveTimeZone,
+        businessHours: effectiveBusinessHoursRaw,
+      },
+    });
+
+    // After-hours handling:
+    // - If there's no workflow, always use the phone-number voicemail fallback.
+    // - If a workflow exists but DOES NOT override business hours/timezone, use the org (tenant) hours and fallback.
+    //   This prevents the workflow from unexpectedly running after-hours unless explicitly configured.
+    // - If a workflow exists with after-hours configuration, handle based on afterHoursMode.
+    
+    let selectedWorkflow = normalWorkflow;
+    
+    if (!isOpenNow && (!normalWorkflow || !workflowHasHoursOverride)) {
+      const callbackUrl =
+        deriveVoicemailCallbackUrl() ||
+        `${req.protocol}://${req.get("host")}${req.baseUrl}/voicemail`;
+      const maxLength = 120;
+      const sayText =
+        normalizeTwilioSayText(phoneNumber.afterHoursMessage || "") ||
+        "Thanks for calling. We're currently closed. Please leave a message after the beep.";
+
+      console.log(
+        `[Twilio] After-hours voicemail fallback: closed, workflow=${
+          normalWorkflow ? "present" : "none"
+        }, workflowHasHoursOverride=${workflowHasHoursOverride}`
+      );
+
+      res.type("text/xml");
+      const actionAttr = callbackUrl
+        ? ` action="${escapeXml(callbackUrl)}?phoneNumberId=${escapeXml(
+            phoneNumber.id
+          )}" method="POST"`
+        : "";
+
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXml(sayText)}</Say>
+  <Record${actionAttr} maxLength="${maxLength}" playBeep="true" />
+  <Say>Thank you. Goodbye.</Say>
+  <Hangup/>
+</Response>`;
+      console.log(`[Twilio] After-hours voicemail TwiML (fallback):`, twiml);
+      res.send(twiml);
+      return;
+    }
+    
+    // Handle workflow-level after-hours configuration
+    if (!isOpenNow && normalWorkflow && workflowHasHoursOverride) {
+      const afterHoursMode = String((normalWorkflow as any)?.afterHoursMode || "USE_ORG");
+      
+      console.log(`[Twilio] After-hours detected for workflow ${(normalWorkflow as any).id}, mode: ${afterHoursMode}`);
+      
+      if (afterHoursMode === "CUSTOM_VOICEMAIL") {
+        const callbackUrl =
+          deriveVoicemailCallbackUrl() ||
+          `${req.protocol}://${req.get("host")}${req.baseUrl}/voicemail`;
+        const maxLength = 120;
+        const sayText =
+          normalizeTwilioSayText((normalWorkflow as any)?.afterHoursMessage || "") ||
+          normalizeTwilioSayText(phoneNumber.afterHoursMessage || "") ||
+          "Thanks for calling. We're currently closed. Please leave a message after the beep.";
+
+        console.log(`[Twilio] Using workflow custom after-hours voicemail`);
+
+        res.type("text/xml");
+        const actionAttr = callbackUrl
+          ? ` action="${escapeXml(callbackUrl)}?phoneNumberId=${escapeXml(
+              phoneNumber.id
+            )}" method="POST"`
+          : "";
+
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXml(sayText)}</Say>
+  <Record${actionAttr} maxLength="${maxLength}" playBeep="true" />
+  <Say>Thank you. Goodbye.</Say>
+  <Hangup/>
+</Response>`;
+        console.log(`[Twilio] After-hours custom voicemail TwiML:`, twiml);
+        res.send(twiml);
+        return;
+      } else if (afterHoursMode === "REDIRECT_WORKFLOW") {
+        const targetWorkflowId = String((normalWorkflow as any)?.afterHoursWorkflowId || "");
+        
+        if (targetWorkflowId) {
+          console.log(`[Twilio] Redirecting to after-hours workflow: ${targetWorkflowId}`);
+          
+          // Load the target workflow
+          const targetWorkflow = await prisma.workflow.findFirst({
+            where: {
+              id: targetWorkflowId,
+              tenantId: phoneNumber.tenantId,
+              isActive: true,
+            },
+            include: {
+              aiConfig: true,
+              documents: {
+                include: {
+                  document: true,
+                },
+              },
+              assignedAgent: {
+                select: {
+                  id: true,
+                  name: true,
+                  agentTimeZone: true,
+                  workingHours: true,
+                },
+              },
+            } as any,
+          });
+          
+          if (targetWorkflow) {
+            console.log(`[Twilio] Successfully loaded after-hours target workflow: ${targetWorkflow.name}`);
+            selectedWorkflow = targetWorkflow;
+          } else {
+            console.log(`[Twilio] After-hours target workflow not found, using original workflow`);
+          }
+        }
+      }
+      // If afterHoursMode === "USE_ORG", continue with normal workflow execution
+    }
 
     let workflowId = "default";
     let systemPrompt =
@@ -783,8 +845,11 @@ router.post("/voice", async (req: Request, res: Response) => {
     let requestInfo: any = {};
 
     if (selectedWorkflow) {
-      workflowId = selectedWorkflow.id;
-      documentIds = selectedWorkflow.documents.map((wd: any) => wd.document.id);
+      const selectedWorkflowAny = selectedWorkflow as any;
+      workflowId = selectedWorkflowAny.id;
+      documentIds = (selectedWorkflowAny.documents || []).map(
+        (wd: any) => wd.document.id
+      );
 
       const workflowPhoneVoiceId = String(
         (selectedWorkflow as any)?.phoneVoiceId ?? ""
@@ -803,11 +868,12 @@ router.post("/voice", async (req: Request, res: Response) => {
         : workflowPhoneVoiceLanguage;
       requestInfo = trigger.requestInfo;
 
-      const aiConfig = selectedWorkflow.aiConfig;
-      if (aiConfig) {
-        agentName = aiConfig.name || agentName;
-        const businessInfo = aiConfig.businessDescription || "";
-        systemPrompt = aiConfig.systemPrompt || systemPrompt;
+      const aiConfig = selectedWorkflowAny?.aiConfig as any;
+      if (aiConfig && typeof aiConfig === "object") {
+        agentName = String(aiConfig.name || "").trim() || agentName;
+        const businessInfo = String(aiConfig.businessDescription || "");
+        systemPrompt =
+          String(aiConfig.systemPrompt || "").trim() || systemPrompt;
         if (businessInfo) {
           systemPrompt = `${systemPrompt}\n\nBusiness Context: ${businessInfo}`;
         }
@@ -817,7 +883,7 @@ router.post("/voice", async (req: Request, res: Response) => {
         (selectedWorkflow as any)?.toneOfVoice ?? ""
       ).trim();
       const configToneOfVoice = String(
-        (selectedWorkflow.aiConfig as any)?.toneOfVoice ?? ""
+        (aiConfig as any)?.toneOfVoice ?? ""
       ).trim();
       const effectiveToneOfVoice = workflowToneOfVoice || configToneOfVoice;
       if (effectiveToneOfVoice) {
@@ -828,7 +894,7 @@ router.post("/voice", async (req: Request, res: Response) => {
       }
 
       console.log(
-        `[Twilio] Selected workflow ${selectedWorkflow.id} (${selectedWorkflow.name}) for To=${To}`
+        `[Twilio] Selected workflow ${selectedWorkflowAny.id} (${selectedWorkflowAny.name}) for To=${To}`
       );
       console.log(`[Twilio] Agent name: ${agentName}`);
       console.log(`[Twilio] Documents assigned: ${documentIds.length}`);
@@ -957,13 +1023,15 @@ router.post("/voice", async (req: Request, res: Response) => {
       },
       workflow: {
         id: workflowId,
-        name: selectedWorkflow?.name,
-        assignedAgent: selectedWorkflow?.assignedAgent
+        name: (selectedWorkflow as any)?.name,
+        assignedAgent: (selectedWorkflow as any)?.assignedAgent
           ? {
-              id: selectedWorkflow.assignedAgent.id,
-              name: selectedWorkflow.assignedAgent.name,
-              agentTimeZone: selectedWorkflow.assignedAgent.agentTimeZone,
-              workingHours: selectedWorkflow.assignedAgent.workingHours,
+              id: (selectedWorkflow as any).assignedAgent.id,
+              name: (selectedWorkflow as any).assignedAgent.name,
+              agentTimeZone: (selectedWorkflow as any).assignedAgent
+                .agentTimeZone,
+              workingHours: (selectedWorkflow as any).assignedAgent
+                .workingHours,
             }
           : undefined,
       },
@@ -1066,17 +1134,39 @@ router.post("/voice", async (req: Request, res: Response) => {
             });
 
             res.type("text/xml");
-            const twiml = buildTwilioDialTwiml({
-              toCallerId: To,
-              numbers,
-              clients,
-              timeoutSeconds,
-              actionUrl,
-            });
-            console.log(
-              `[Twilio] Sending dial TwiML for ${firstLabel}:`,
-              twiml
-            );
+            
+            // If there's a greeting, play it before forwarding
+            let twiml: string;
+            if (greeting && greeting.trim()) {
+              const greetingText = normalizeTwilioSayText(greeting);
+              twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXml(greetingText)}</Say>
+  ${buildTwilioDialTwiml({
+    toCallerId: To,
+    numbers,
+    clients,
+    timeoutSeconds,
+    actionUrl,
+  }).replace(/<\?xml[^>]*>/, '').replace(/<\/?Response>/g, '')}
+</Response>`;
+              console.log(
+                `[Twilio] Sending greeting + dial TwiML for ${firstLabel}:`,
+                twiml
+              );
+            } else {
+              twiml = buildTwilioDialTwiml({
+                toCallerId: To,
+                numbers,
+                clients,
+                timeoutSeconds,
+                actionUrl,
+              });
+              console.log(
+                `[Twilio] Sending dial TwiML for ${firstLabel}:`,
+                twiml
+              );
+            }
             res.send(twiml);
             return;
           }
@@ -1519,10 +1609,37 @@ router.post("/voicemail", async (req: Request, res: Response) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.to(conversation.id).emit("new_message", {
+      const messageData = {
         ...message,
         timestamp: message.createdAt.toISOString(),
-      });
+      };
+      // Emit to conversation room for real-time chat updates
+      io.to(conversation.id).emit("new_message", messageData);
+      // Also emit to tenant room for voicemail notifications
+      io.to(`tenant_${phoneNumber.tenantId}`).emit("new_message", messageData);
+    }
+
+    // Create call log entry for voicemail
+    if (CallSid) {
+      try {
+        await prisma.callLog.create({
+          data: {
+            tenantId: phoneNumber.tenantId,
+            callSid: CallSid,
+            direction: "inbound",
+            from: String(From || ""),
+            to: String(To || ""),
+            status: "no-answer",
+            durationSeconds: 0,
+            recordingUrl: recording || null,
+            customerId: customer.id,
+            phoneNumberId: phoneNumber.id,
+          },
+        });
+        console.log(`[Twilio] Call log created for voicemail ${CallSid}`);
+      } catch (e) {
+        console.warn("[Twilio] Failed to create call log for voicemail:", e);
+      }
     }
 
     res.type("text/xml");
@@ -1542,7 +1659,7 @@ router.post("/voicemail", async (req: Request, res: Response) => {
  */
 router.post("/status", async (req: Request, res: Response) => {
   try {
-    const { CallSid, CallStatus, CallDuration } = req.body;
+    const { CallSid, CallStatus, CallDuration, From, To, Direction } = req.body;
 
     console.log(
       `[Twilio] Status callback: ${CallSid} - ${CallStatus}, Duration: ${CallDuration}s`
@@ -1560,7 +1677,7 @@ router.post("/status", async (req: Request, res: Response) => {
       }
     }
 
-    // Track usage if call completed
+    // Track usage and create call log if call completed
     if (CallStatus === "completed" && CallDuration) {
       const durationSeconds = Number(CallDuration);
       const meta = (global as any).twilioCallMetadata?.[CallSid];
@@ -1578,6 +1695,41 @@ router.post("/status", async (req: Request, res: Response) => {
           });
         } catch (e) {
           console.warn("[Twilio] Failed to track inbound call usage:", e);
+        }
+      }
+
+      // Create call log entry
+      if (tenantId && CallSid) {
+        try {
+          // Find customer by phone number
+          const fromNumber = String(From || "");
+          const safeDigits = fromNumber.replace(/[^0-9]/g, "").slice(-15);
+          const email = safeDigits ? `voice-${safeDigits}@example.com` : null;
+
+          const customer = email
+            ? await prisma.user.findUnique({
+                where: { email },
+                select: { id: true },
+              })
+            : null;
+
+          await prisma.callLog.create({
+            data: {
+              tenantId,
+              callSid: CallSid,
+              direction: String(Direction || "inbound").toLowerCase(),
+              from: fromNumber,
+              to: String(To || ""),
+              status: String(CallStatus || "unknown").toLowerCase(),
+              durationSeconds: Math.floor(durationSeconds),
+              customerId: customer?.id || null,
+              phoneNumberId: phoneNumberId || null,
+            },
+          });
+
+          console.log(`[Twilio] Call log created for ${CallSid}`);
+        } catch (e) {
+          console.warn("[Twilio] Failed to create call log:", e);
         }
       }
     }

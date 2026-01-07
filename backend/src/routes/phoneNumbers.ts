@@ -10,9 +10,9 @@ const telnyxService = new TelnyxService();
 const twilioService = new TwilioService();
 const pricingService = new PricingService();
 
-const normalizeAfterHoursMode = (raw: unknown): "VOICEMAIL" | "AI_WORKFLOW" => {
-  const v = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-  if (v === "AI_WORKFLOW") return "AI_WORKFLOW";
+const normalizeAfterHoursMode = (_raw: unknown): "VOICEMAIL" => {
+  // Phone-number after-hours settings are now voicemail-only fallback.
+  // Workflow-level configuration controls any routing/automation.
   return "VOICEMAIL";
 };
 
@@ -100,10 +100,7 @@ router.put("/:id/after-hours", async (req: Request, res: Response) => {
     }
 
     const mode = normalizeAfterHoursMode(req.body?.afterHoursMode);
-    const afterHoursWorkflowId =
-      typeof req.body?.afterHoursWorkflowId === "string"
-        ? req.body.afterHoursWorkflowId.trim() || null
-        : null;
+    const afterHoursWorkflowId = null;
     const afterHoursMessage =
       typeof req.body?.afterHoursMessage === "string"
         ? req.body.afterHoursMessage
@@ -112,20 +109,6 @@ router.put("/:id/after-hours", async (req: Request, res: Response) => {
       typeof req.body?.afterHoursNotifyUserId === "string"
         ? req.body.afterHoursNotifyUserId.trim() || null
         : null;
-
-    if (afterHoursWorkflowId) {
-      const workflow = await prisma.workflow.findFirst({
-        where: {
-          id: afterHoursWorkflowId,
-          tenantId: phoneNumber.tenantId,
-          triggerType: "Incoming Call",
-        },
-        select: { id: true },
-      });
-      if (!workflow) {
-        return res.status(400).json({ error: "Invalid after-hours workflow" });
-      }
-    }
 
     if (afterHoursNotifyUserId) {
       const user = await prisma.user.findFirst({
@@ -147,7 +130,7 @@ router.put("/:id/after-hours", async (req: Request, res: Response) => {
       where: { id },
       data: {
         afterHoursMode: mode,
-        afterHoursWorkflowId: afterHoursWorkflowId,
+        afterHoursWorkflowId: null,
         afterHoursMessage: afterHoursMessage,
         afterHoursNotifyUserId: afterHoursNotifyUserId,
       },
@@ -238,10 +221,15 @@ router.post("/purchase", async (req: Request, res: Response) => {
       }
 
       const voiceWebhookUrl = process.env.TWILIO_WEBHOOK_URL || "";
-      const smsWebhookUrl = process.env.SMS_WEBHOOK_URL || 
-        (voiceWebhookUrl.replace(/\/voice$/, "/twilio/sms"));
-      
-      await twilioService.purchaseNumber(phoneNumber, voiceWebhookUrl, smsWebhookUrl);
+      const smsWebhookUrl =
+        process.env.SMS_WEBHOOK_URL ||
+        voiceWebhookUrl.replace(/\/voice$/, "/twilio/sms");
+
+      await twilioService.purchaseNumber(
+        phoneNumber,
+        voiceWebhookUrl,
+        smsWebhookUrl
+      );
 
       // Wait for provisioning
       await new Promise((resolve) => setTimeout(resolve, 2000));
