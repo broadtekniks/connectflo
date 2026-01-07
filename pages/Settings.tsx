@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import {
   User,
+  Users,
   Bell,
   Shield,
   Globe,
@@ -26,9 +27,16 @@ import {
   PackageOpen,
   Target,
   Tag,
+  Lock,
+  Mail,
+  ChevronRight,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
 } from "lucide-react";
 import { User as UserType, Plan } from "../types";
 import { api } from "../services/api";
+import { socketService } from "../services/socket";
 import TestChatWidget from "../components/TestChatWidget";
 import PhoneVoiceSettings from "../components/PhoneVoiceSettings";
 import AlertModal from "../components/AlertModal";
@@ -36,6 +44,8 @@ import ConfirmationModal from "../components/ConfirmationModal";
 import WorkingHoursModal, {
   WorkingHoursConfig,
 } from "../components/WorkingHoursModal";
+import PhoneVerification from "../components/PhoneVerification";
+import TOTPSetup from "../components/TOTPSetup";
 
 const getDetectedTimeZone = (): string => {
   try {
@@ -544,6 +554,47 @@ const Settings: React.FC = () => {
   const [webPhoneLoading, setWebPhoneLoading] = useState(false);
   const [webPhoneSaving, setWebPhoneSaving] = useState(false);
 
+  // Extensions state
+  const [extensions, setExtensions] = useState<
+    Array<{
+      userId: string;
+      name: string;
+      email: string;
+      extension: string;
+      label: string | null;
+      status: string;
+    }>
+  >([]);
+  const [extensionsLoading, setExtensionsLoading] = useState(false);
+  const [teamMembers, setTeamMembers] = useState<
+    Array<{
+      id: string;
+      name: string;
+      email: string;
+    }>
+  >([]);
+  const [selectedUserId, setSelectedUserId] = useState<string>("");
+  const [assignExtension, setAssignExtension] = useState<string>("");
+  const [assignExtensionLabel, setAssignExtensionLabel] = useState<string>("");
+  const [extensionSaving, setExtensionSaving] = useState(false);
+
+  // Security state
+  const [securityStatus, setSecurityStatus] = useState<{
+    emailVerified: boolean;
+    phoneVerified: boolean;
+    mfaEnabled: boolean;
+    isGoogleUser: boolean;
+  }>({
+    emailVerified: false,
+    phoneVerified: false,
+    mfaEnabled: false,
+    isGoogleUser: false,
+  });
+  const [securityLoading, setSecurityLoading] = useState(true);
+  const [showPhoneVerification, setShowPhoneVerification] = useState(false);
+  const [showTOTPSetup, setShowTOTPSetup] = useState(false);
+  const [googleAuthLinking, setGoogleAuthLinking] = useState(false);
+
   useEffect(() => {
     const userStr = localStorage.getItem("user");
     if (userStr) {
@@ -692,6 +743,89 @@ const Settings: React.FC = () => {
       .finally(() => setWebPhoneLoading(false));
   }, [user?.tenantId, user?.role]);
 
+  // Load extensions and team members
+  useEffect(() => {
+    if (!user) return;
+
+    setExtensionsLoading(true);
+
+    // Load extensions
+    api
+      .get("/extensions")
+      .then((data: any) => {
+        setExtensions(data.extensions || []);
+      })
+      .catch((err) => {
+        console.error("Failed to load extensions", err);
+      })
+      .finally(() => setExtensionsLoading(false));
+
+    // Load team members
+    api
+      .get("/team-members")
+      .then((data: any) => {
+        // API returns array directly, not wrapped in object
+        const members = Array.isArray(data) ? data : [];
+        setTeamMembers(
+          members.map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            email: m.email,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to load team members", err);
+      });
+
+    // Subscribe to real-time extension presence updates
+    socketService.connect();
+    const handlePresenceUpdate = (payload: {
+      userId: string;
+      tenantId: string;
+      status: string;
+      lastSeen: string | null;
+    }) => {
+      console.log("Extension presence update received:", payload);
+      setExtensions((prev) =>
+        prev.map((ext) =>
+          ext.userId === payload.userId
+            ? { ...ext, status: payload.status }
+            : ext
+        )
+      );
+    };
+
+    socketService.onExtensionPresenceUpdated(handlePresenceUpdate);
+
+    return () => {
+      socketService.offExtensionPresenceUpdated();
+    };
+  }, [user]);
+
+  // Load security status
+  useEffect(() => {
+    if (!user) return;
+
+    setSecurityLoading(true);
+    api.me
+      .getProfile()
+      .then((profile: any) => {
+        setSecurityStatus({
+          emailVerified: Boolean(profile.emailVerified),
+          phoneVerified: Boolean(profile.phoneVerified),
+          mfaEnabled: Boolean(profile.mfaEnabled),
+          isGoogleUser: Boolean(profile.googleId), // User has googleId means they signed up with Google
+        });
+      })
+      .catch((error) => {
+        console.error("Failed to load security status:", error);
+      })
+      .finally(() => {
+        setSecurityLoading(false);
+      });
+  }, [user?.id]);
+
   const handleToggleWebPhoneEnabled = async (next: boolean) => {
     if (!user?.tenantId) return;
     if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
@@ -760,6 +894,85 @@ const Settings: React.FC = () => {
     }
   };
 
+  const handleAssignExtension = async () => {
+    if (!selectedUserId || !assignExtension) return;
+
+    setExtensionSaving(true);
+    try {
+      await api.post("/extensions/assign", {
+        userId: selectedUserId,
+        extension: assignExtension.trim(),
+        label: assignExtensionLabel.trim() || undefined,
+      });
+
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Saved",
+        message: "Extension assigned successfully.",
+        type: "success",
+      });
+
+      // Reset form and reload extensions
+      setSelectedUserId("");
+      setAssignExtension("");
+      setAssignExtensionLabel("");
+
+      const data: any = await api.get("/extensions");
+      setExtensions(data.extensions || []);
+    } catch (error: any) {
+      console.error("Failed to save extension", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: error.message || "Failed to save extension.",
+        type: "error",
+      });
+    } finally {
+      setExtensionSaving(false);
+    }
+  };
+
+  const handleRemoveExtension = async (userId: string) => {
+    setExtensionSaving(true);
+    try {
+      await api.delete(`/extensions/${userId}`);
+
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Removed",
+        message: "Extension removed successfully.",
+        type: "success",
+      });
+
+      // Reload extensions
+      const data: any = await api.get("/extensions");
+      setExtensions(data.extensions || []);
+    } catch (error: any) {
+      console.error("Failed to remove extension", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Remove failed",
+        message: error.message || "Failed to remove extension.",
+        type: "error",
+      });
+    } finally {
+      setExtensionSaving(false);
+    }
+  };
+
+  // When a team member is selected, pre-fill their current extension if any
+  const handleTeamMemberSelect = (userId: string) => {
+    setSelectedUserId(userId);
+    const existingExt = extensions.find((e) => e.userId === userId);
+    if (existingExt) {
+      setAssignExtension(existingExt.extension || "");
+      setAssignExtensionLabel(existingExt.label || "");
+    } else {
+      setAssignExtension("");
+      setAssignExtensionLabel("");
+    }
+  };
+
   const handleSaveBusinessHours = async () => {
     if (!user?.tenantId) return;
     if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
@@ -791,6 +1004,79 @@ const Settings: React.FC = () => {
     } finally {
       setBusinessHoursSaving(false);
     }
+  };
+
+  // Security handlers
+  const handlePhoneVerificationComplete = async () => {
+    setShowPhoneVerification(false);
+    // Refresh security status
+    try {
+      const profile: any = await api.me.getProfile();
+      setSecurityStatus({
+        emailVerified: Boolean(profile.emailVerified),
+        phoneVerified: Boolean(profile.phoneVerified),
+        mfaEnabled: Boolean(profile.mfaEnabled),
+        isGoogleUser: Boolean(profile.googleId),
+      });
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "Phone verification completed successfully!",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to refresh security status:", error);
+    }
+  };
+
+  const handleTOTPSetupComplete = async () => {
+    setShowTOTPSetup(false);
+    // Refresh security status
+    try {
+      const profile: any = await api.me.getProfile();
+      setSecurityStatus({
+        emailVerified: Boolean(profile.emailVerified),
+        phoneVerified: Boolean(profile.phoneVerified),
+        mfaEnabled: Boolean(profile.mfaEnabled),
+        isGoogleUser: Boolean(profile.googleId),
+      });
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "Two-factor authentication enabled successfully!",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to refresh security status:", error);
+    }
+  };
+
+  const handleLinkGoogleAccount = async () => {
+    setGoogleAuthLinking(true);
+    try {
+      // Get Google OAuth URL from backend
+      const response = await api.post("/auth/link-google");
+      if (response.authUrl) {
+        // Redirect to Google OAuth
+        window.location.href = response.authUrl;
+      }
+    } catch (error) {
+      console.error("Failed to link Google account:", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Error",
+        message: "Failed to link Google account. Please try again.",
+        type: "error",
+      });
+      setGoogleAuthLinking(false);
+    }
+  };
+
+  const getSecurityLevel = (): number => {
+    if (!securityStatus.emailVerified) return 0;
+    if (!securityStatus.phoneVerified) return 1;
+    if (!securityStatus.mfaEnabled) return 2;
+    return 3;
   };
 
   // AI Config State
@@ -997,6 +1283,12 @@ const Settings: React.FC = () => {
       label: "Web Phone",
       icon: Phone,
       roles: ["TENANT_ADMIN", "SUPER_ADMIN"],
+    },
+    {
+      id: "extensions",
+      label: "Extensions",
+      icon: Users,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN", "AGENT"],
     },
     {
       id: "ai-agent",
@@ -1871,50 +2163,368 @@ const Settings: React.FC = () => {
                   Security Settings
                 </h2>
                 <p className="text-slate-500">
-                  Protect your organization's data.
+                  Protect your account with multi-level security.
                 </p>
               </div>
 
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-bold text-slate-800">
-                      Two-Factor Authentication (2FA)
+              {securityLoading ? (
+                <div className="flex justify-center items-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                </div>
+              ) : (
+                <>
+                  {/* Security Progress Bar */}
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold text-slate-800">
+                        Security Level: {getSecurityLevel()}/3
+                      </h3>
+                      <span
+                        className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                          getSecurityLevel() === 3
+                            ? "bg-green-100 text-green-700"
+                            : getSecurityLevel() === 2
+                            ? "bg-blue-100 text-blue-700"
+                            : getSecurityLevel() === 1
+                            ? "bg-yellow-100 text-yellow-700"
+                            : "bg-red-100 text-red-700"
+                        }`}
+                      >
+                        {getSecurityLevel() === 3
+                          ? "Fully Secured"
+                          : getSecurityLevel() === 2
+                          ? "Good"
+                          : getSecurityLevel() === 1
+                          ? "Basic"
+                          : "Not Verified"}
+                      </span>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div className="relative h-3 bg-slate-200 rounded-full overflow-hidden mb-2">
+                      <div
+                        className="absolute top-0 left-0 h-full bg-gradient-to-r from-green-400 via-blue-500 to-purple-600 transition-all duration-500"
+                        style={{
+                          width: `${(getSecurityLevel() / 3) * 100}%`,
+                        }}
+                      ></div>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-500">
+                      <span>Email</span>
+                      <span>Phone</span>
+                      <span>2FA</span>
+                    </div>
+                  </div>
+
+                  {/* Security Levels */}
+                  <div className="space-y-4">
+                    {/* Level 1: Email Verification */}
+                    <div
+                      className={`bg-white rounded-xl border-2 ${
+                        securityStatus.emailVerified
+                          ? "border-green-200 bg-green-50"
+                          : "border-slate-200"
+                      } shadow-sm p-6`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-4 flex-1">
+                          <div
+                            className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                              securityStatus.emailVerified
+                                ? "bg-green-500"
+                                : "bg-slate-300"
+                            }`}
+                          >
+                            {securityStatus.emailVerified ? (
+                              <CheckCircle className="w-6 h-6 text-white" />
+                            ) : (
+                              <Mail className="w-6 h-6 text-white" />
+                            )}
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h3 className="text-lg font-bold text-slate-800">
+                                Level 1: Email Verification
+                              </h3>
+                              {securityStatus.emailVerified && (
+                                <span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-semibold">
+                                  Verified
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-sm text-slate-600 mb-3">
+                              Confirms your identity and enables basic account
+                              access.
+                            </p>
+                            <div className="text-sm text-slate-500">
+                              <strong>Unlocks:</strong> Dashboard, Inbox,
+                              Workflows, Knowledge Base
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Level 2: Phone Verification */}
+                    <div
+                      className={`bg-white rounded-xl border-2 ${
+                        securityStatus.phoneVerified
+                          ? "border-blue-200 bg-blue-50"
+                          : "border-slate-200"
+                      } shadow-sm p-6`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-4 flex-1">
+                          <div
+                            className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                              securityStatus.phoneVerified
+                                ? "bg-blue-500"
+                                : "bg-slate-300"
+                            }`}
+                          >
+                            {securityStatus.phoneVerified ? (
+                              <CheckCircle className="w-6 h-6 text-white" />
+                            ) : (
+                              <Phone className="w-6 h-6 text-white" />
+                            )}
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h3 className="text-lg font-bold text-slate-800">
+                                Level 2: Phone Verification
+                              </h3>
+                              {securityStatus.phoneVerified && (
+                                <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-semibold">
+                                  Verified
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-sm text-slate-600 mb-3">
+                              Verify your phone number via SMS to unlock voice
+                              features and billing access.
+                            </p>
+                            <div className="text-sm text-slate-500 mb-4">
+                              <strong>Unlocks:</strong> Voice Calls, Phone
+                              Numbers, Voicemails, View Billing
+                            </div>
+                            {!securityStatus.phoneVerified && (
+                              <button
+                                onClick={() => setShowPhoneVerification(true)}
+                                disabled={!securityStatus.emailVerified}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed flex items-center gap-2"
+                              >
+                                {!securityStatus.emailVerified && (
+                                  <Lock className="w-4 h-4" />
+                                )}
+                                {securityStatus.emailVerified
+                                  ? "Verify Phone"
+                                  : "Complete Email First"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Level 3: Two-Factor Authentication */}
+                    <div
+                      className={`bg-white rounded-xl border-2 ${
+                        securityStatus.mfaEnabled
+                          ? "border-purple-200 bg-purple-50"
+                          : "border-slate-200"
+                      } shadow-sm p-6`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-4 flex-1">
+                          <div
+                            className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                              securityStatus.mfaEnabled
+                                ? "bg-purple-500"
+                                : "bg-slate-300"
+                            }`}
+                          >
+                            {securityStatus.mfaEnabled ? (
+                              <CheckCircle className="w-6 h-6 text-white" />
+                            ) : (
+                              <Shield className="w-6 h-6 text-white" />
+                            )}
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h3 className="text-lg font-bold text-slate-800">
+                                Level 3: Two-Factor Authentication (TOTP)
+                              </h3>
+                              {securityStatus.mfaEnabled && (
+                                <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-semibold">
+                                  Enabled
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-sm text-slate-600 mb-3">
+                              Add an extra layer of security with authenticator
+                              app protection.
+                              <strong className="block mt-2 text-blue-600">
+                                Recommended for enhanced account security
+                              </strong>
+                            </p>
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                              <div className="flex items-start gap-2">
+                                <Shield className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
+                                <div className="text-sm text-blue-800">
+                                  <strong>Security Benefits:</strong>
+                                  <ul className="list-disc list-inside mt-1 space-y-1">
+                                    <li>Protects against password theft</li>
+                                    <li>Prevents unauthorized access</li>
+                                    <li>Secures sensitive operations</li>
+                                  </ul>
+                                </div>
+                              </div>
+                            </div>
+                            {!securityStatus.mfaEnabled && (
+                              <button
+                                onClick={() => setShowTOTPSetup(true)}
+                                disabled={!securityStatus.phoneVerified}
+                                className="px-4 py-2 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed flex items-center gap-2"
+                              >
+                                {!securityStatus.phoneVerified && (
+                                  <Lock className="w-4 h-4" />
+                                )}
+                                {securityStatus.phoneVerified
+                                  ? "Enable 2FA (Recommended)"
+                                  : "Complete Phone First"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Google Authentication */}
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div className="p-6 flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 bg-white rounded-lg border border-slate-200 flex items-center justify-center">
+                          <svg
+                            viewBox="0 0 24 24"
+                            className="w-6 h-6"
+                            xmlns="http://www.w3.org/2000/svg"
+                          >
+                            <path
+                              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                              fill="#4285F4"
+                            />
+                            <path
+                              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                              fill="#34A853"
+                            />
+                            <path
+                              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                              fill="#FBBC05"
+                            />
+                            <path
+                              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                              fill="#EA4335"
+                            />
+                          </svg>
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-slate-800">
+                            Google Authentication
+                          </h3>
+                          <p className="text-sm text-slate-500">
+                            {securityStatus.isGoogleUser
+                              ? "Your account is linked with Google"
+                              : "Link your Google account for easy sign-in"}
+                          </p>
+                        </div>
+                      </div>
+                      <div>
+                        {securityStatus.isGoogleUser ? (
+                          <div className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg font-semibold">
+                            <CheckCircle className="w-4 h-4" />
+                            Connected
+                          </div>
+                        ) : (
+                          <button
+                            onClick={handleLinkGoogleAccount}
+                            disabled={googleAuthLinking}
+                            className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed flex items-center gap-2"
+                          >
+                            {googleAuthLinking ? (
+                              <>
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                                Linking...
+                              </>
+                            ) : (
+                              "Link Google Account"
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Session Timeout */}
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                    <h3 className="font-bold text-slate-800 mb-2">
+                      Session Timeout
                     </h3>
-                    <p className="text-sm text-slate-500">
-                      Require 2FA for all agent logins.
+                    <p className="text-sm text-slate-500 mb-4">
+                      Automatically log out after inactivity
                     </p>
+                    <select className="w-64 px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm">
+                      <option>15 minutes</option>
+                      <option>30 minutes</option>
+                      <option selected>1 hour</option>
+                      <option>4 hours</option>
+                      <option>Never</option>
+                    </select>
                   </div>
-                  <div className="relative inline-block w-12 h-6 transition duration-200 ease-in-out rounded-full cursor-pointer bg-slate-200">
-                    <span className="absolute left-0 inline-block w-6 h-6 bg-white border border-slate-300 rounded-full shadow transform transition-transform duration-200 ease-in-out translate-x-0"></span>
+                </>
+              )}
+
+              {/* Phone Verification Modal */}
+              {showPhoneVerification && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                  <div className="bg-white rounded-xl max-w-md w-full p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-xl font-bold text-slate-800">
+                        Phone Verification
+                      </h3>
+                      <button
+                        onClick={() => setShowPhoneVerification(false)}
+                        className="text-slate-400 hover:text-slate-600"
+                      >
+                        <XCircle className="w-6 h-6" />
+                      </button>
+                    </div>
+                    <PhoneVerification
+                      onVerified={handlePhoneVerificationComplete}
+                    />
                   </div>
                 </div>
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-bold text-slate-800">
-                      Single Sign-On (SSO)
-                    </h3>
-                    <p className="text-sm text-slate-500">
-                      Allow login via Google Workspace or Okta.
-                    </p>
-                  </div>
-                  <div className="relative inline-block w-12 h-6 transition duration-200 ease-in-out rounded-full cursor-pointer bg-indigo-600">
-                    <span className="absolute left-0 inline-block w-6 h-6 bg-white border border-slate-300 rounded-full shadow transform transition-transform duration-200 ease-in-out translate-x-6"></span>
+              )}
+
+              {/* TOTP Setup Modal */}
+              {showTOTPSetup && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                  <div className="bg-white rounded-xl max-w-md w-full p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-xl font-bold text-slate-800">
+                        Setup Two-Factor Authentication
+                      </h3>
+                      <button
+                        onClick={() => setShowTOTPSetup(false)}
+                        className="text-slate-400 hover:text-slate-600"
+                      >
+                        <XCircle className="w-6 h-6" />
+                      </button>
+                    </div>
+                    <TOTPSetup onSetupComplete={handleTOTPSetupComplete} />
                   </div>
                 </div>
-                <div className="p-6">
-                  <h3 className="font-bold text-slate-800 mb-2">
-                    Session Timeout
-                  </h3>
-                  <select className="w-64 px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm">
-                    <option>15 minutes</option>
-                    <option>30 minutes</option>
-                    <option selected>1 hour</option>
-                    <option>4 hours</option>
-                    <option>Never</option>
-                  </select>
-                </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -2217,6 +2827,200 @@ const Settings: React.FC = () => {
                 </div>
               </div>
             )}
+
+          {/* --- EXTENSIONS --- */}
+          {activeTab === "extensions" && (
+            <div className="space-y-8 animate-fade-in">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">Extensions</h2>
+                <p className="text-slate-500">
+                  Assign internal extension numbers for free VoIP calling
+                  between team members.
+                </p>
+              </div>
+
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <Phone size={18} className="text-indigo-500" /> Assign
+                  Extension
+                </h3>
+
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1.5fr] gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Team Member
+                      </label>
+                      <select
+                        value={selectedUserId}
+                        onChange={(e) => handleTeamMemberSelect(e.target.value)}
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                        disabled={extensionSaving}
+                      >
+                        <option value="">Select a team member...</option>
+                        {teamMembers.map((member) => {
+                          const hasExtension = extensions.find(
+                            (e) => e.userId === member.id
+                          );
+                          return (
+                            <option key={member.id} value={member.id}>
+                              {member.name} ({member.email})
+                              {hasExtension
+                                ? ` - Ext. ${hasExtension.extension}`
+                                : ""}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2 whitespace-nowrap">
+                        Extension (3-4 digits)
+                      </label>
+                      <input
+                        type="text"
+                        value={assignExtension}
+                        onChange={(e) => {
+                          const val = e.target.value
+                            .replace(/\D/g, "")
+                            .slice(0, 4);
+                          setAssignExtension(val);
+                        }}
+                        placeholder="e.g., 101"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                        disabled={extensionSaving || !selectedUserId}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Label (optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={assignExtensionLabel}
+                        onChange={(e) =>
+                          setAssignExtensionLabel(e.target.value)
+                        }
+                        placeholder="e.g., Sales, Support, Main Desk"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                        disabled={extensionSaving || !selectedUserId}
+                      />
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-slate-400">
+                    Team members can call each other at their extensions for
+                    FREE via VoIP
+                  </p>
+
+                  <div className="flex items-center justify-end gap-3">
+                    {selectedUserId &&
+                      extensions.find((e) => e.userId === selectedUserId) && (
+                        <button
+                          onClick={() => handleRemoveExtension(selectedUserId)}
+                          disabled={extensionSaving}
+                          className="text-red-600 px-6 py-2 rounded-lg font-medium hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Remove Extension
+                        </button>
+                      )}
+                    <button
+                      onClick={handleAssignExtension}
+                      disabled={
+                        extensionSaving ||
+                        !selectedUserId ||
+                        !assignExtension ||
+                        assignExtension.length < 3
+                      }
+                      className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {extensionSaving ? "Saving…" : "Assign Extension"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <Users size={18} className="text-indigo-500" /> Extension
+                  Directory
+                </h3>
+
+                {extensionsLoading ? (
+                  <div className="text-sm text-slate-500">
+                    Loading extensions...
+                  </div>
+                ) : extensions.length === 0 ? (
+                  <div className="text-sm text-slate-500">
+                    No extensions assigned yet.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {extensions.map((ext) => (
+                      <div
+                        key={ext.userId}
+                        className="flex items-center justify-between py-3 px-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="font-mono font-bold text-lg text-indigo-600">
+                            {ext.extension}
+                          </div>
+                          <div>
+                            <div className="font-medium text-slate-900">
+                              {ext.name}
+                            </div>
+                            <div className="text-sm text-slate-500">
+                              {ext.label && (
+                                <span className="mr-2">({ext.label})</span>
+                              )}
+                              {ext.email}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              ext.status === "ONLINE"
+                                ? "bg-green-100 text-green-800"
+                                : ext.status === "BUSY"
+                                ? "bg-yellow-100 text-yellow-800"
+                                : ext.status === "AWAY"
+                                ? "bg-orange-100 text-orange-800"
+                                : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {ext.status}
+                          </span>
+                          <button
+                            onClick={() => {
+                              setSelectedUserId(ext.userId);
+                              setAssignExtension(ext.extension || "");
+                              setAssignExtensionLabel(ext.label || "");
+                              // Scroll to top to show the assignment form
+                              window.scrollTo({ top: 0, behavior: "smooth" });
+                            }}
+                            className="text-indigo-600 hover:text-indigo-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-indigo-50"
+                            disabled={extensionSaving}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleRemoveExtension(ext.userId)}
+                            className="text-red-600 hover:text-red-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-red-50"
+                            disabled={extensionSaving}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

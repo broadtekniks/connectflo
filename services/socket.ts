@@ -70,6 +70,25 @@ class SocketService {
     }
   }
 
+  onExtensionPresenceUpdated(
+    callback: (payload: {
+      userId: string;
+      tenantId: string;
+      status: string;
+      lastSeen: string | null;
+    }) => void
+  ) {
+    if (this.socket) {
+      this.socket.on("extension_presence_updated", callback);
+    }
+  }
+
+  offExtensionPresenceUpdated() {
+    if (this.socket) {
+      this.socket.off("extension_presence_updated");
+    }
+  }
+
   setWebPhoneReady(ready: boolean) {
     if (!this.socket) return;
     this.socket.emit(ready ? "webphone:set_ready" : "webphone:set_not_ready");

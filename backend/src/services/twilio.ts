@@ -64,7 +64,11 @@ export class TwilioService {
   /**
    * Purchase a phone number
    */
-  async purchaseNumber(phoneNumber: string, voiceWebhookUrl?: string, smsWebhookUrl?: string) {
+  async purchaseNumber(
+    phoneNumber: string,
+    voiceWebhookUrl?: string,
+    smsWebhookUrl?: string
+  ) {
     if (!twilioClient) throw new Error("Twilio credentials not configured");
 
     try {
@@ -84,8 +88,8 @@ export class TwilioService {
       // Optionally add to messaging service for A2P 10DLC
       if (process.env.TWILIO_MESSAGING_SERVICE_SID) {
         try {
-          await twilioClient
-            .messaging.v1.services(process.env.TWILIO_MESSAGING_SERVICE_SID)
+          await twilioClient.messaging.v1
+            .services(process.env.TWILIO_MESSAGING_SERVICE_SID)
             .phoneNumbers.create({ phoneNumberSid: purchased.sid });
           console.log(`[Twilio] Added ${phoneNumber} to messaging service`);
         } catch (err) {
@@ -188,16 +192,27 @@ export class TwilioService {
 
   /**
    * Send SMS
+   * Note: For US numbers, A2P 10DLC registration is required.
+   * Use messagingServiceSid if configured to avoid 30034 errors.
    */
   async sendSMS(from: string, to: string, body: string) {
     if (!twilioClient) throw new Error("Twilio credentials not configured");
 
     try {
-      const message = await twilioClient.messages.create({
-        from: from,
+      const messageParams: any = {
         to: to,
         body: body,
-      });
+      };
+
+      // Use Messaging Service SID if configured (required for A2P 10DLC)
+      if (process.env.TWILIO_MESSAGING_SERVICE_SID) {
+        messageParams.messagingServiceSid =
+          process.env.TWILIO_MESSAGING_SERVICE_SID;
+      } else {
+        messageParams.from = from;
+      }
+
+      const message = await twilioClient.messages.create(messageParams);
 
       return message;
     } catch (error) {

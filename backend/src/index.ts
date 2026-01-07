@@ -41,6 +41,7 @@ import { voiceRouter, initializeVoiceWebSocket } from "./routes/voice";
 import voiceConfigRoutes from "./routes/voiceConfig";
 import conditionSchemaRoutes from "./routes/conditionSchema";
 import integrationRoutes from "./routes/integrations";
+import extensionRoutes from "./routes/extensions";
 import { authenticateToken } from "./middleware/auth";
 import {
   clearWebPhonePresence,
@@ -112,7 +113,11 @@ io.use((socket, next) => {
     if (!token) return next(new Error("Unauthorized"));
 
     const verified = jwt.verify(token, JWT_SECRET) as any;
-    socket.data.user = verified;
+    const normalized = { ...verified } as any;
+    if (!normalized.id && normalized.userId) normalized.id = normalized.userId;
+    if (!normalized.userId && normalized.id) normalized.userId = normalized.id;
+
+    socket.data.user = normalized;
 
     const tenantId = verified?.tenantId as string | undefined;
     if (tenantId) {
@@ -152,6 +157,7 @@ app.use("/api/plans", authenticateToken, planRoutes);
 app.use("/api/usage", authenticateToken, usageRoutes);
 app.use("/api/voice", authenticateToken, voiceRouter);
 app.use("/api/voice-config", authenticateToken, voiceConfigRoutes);
+app.use("/api/extensions", authenticateToken, extensionRoutes);
 app.use("/api/integrations", integrationRoutes); // Must be BEFORE the catch-all /api route
 app.use("/api", authenticateToken, conditionSchemaRoutes);
 app.use("/webhooks", webhookRoutes);
@@ -162,7 +168,9 @@ io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
 
   const tenantId = (socket.data.user as any)?.tenantId as string | undefined;
-  const userId = (socket.data.user as any)?.userId as string | undefined;
+  const userId =
+    ((socket.data.user as any)?.id as string | undefined) ??
+    ((socket.data.user as any)?.userId as string | undefined);
 
   socket.on("webphone:set_ready", () => {
     if (!tenantId || !userId) return;

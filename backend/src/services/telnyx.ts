@@ -54,24 +54,23 @@ export class TelnyxService {
       // 2. Configure (Best Effort)
       try {
         const app = await this.ensureCallControlApplication();
-        if (app) {
-          // Wait a moment for provisioning
-          await new Promise((resolve) => setTimeout(resolve, 2000));
 
-          // Find the number resource to get its ID
-          const numbers = await telnyx.phoneNumbers.list({
-            filter: { phone_number: phoneNumber },
+        // Wait a moment for provisioning
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Find the number resource to get its ID
+        const numbers = await telnyx.phoneNumbers.list({
+          filter: { phone_number: phoneNumber },
+        });
+
+        if (app && numbers.data && numbers.data.length > 0) {
+          const numId = numbers.data[0].id;
+          await telnyx.phoneNumbers.update(numId, {
+            connection_id: app.id,
           });
-
-          if (numbers.data && numbers.data.length > 0) {
-            const numId = numbers.data[0].id;
-            await telnyx.phoneNumbers.update(numId, {
-              connection_id: app.id,
-            });
-            console.log(
-              `Configured ${phoneNumber} with App ${app.application_name}`
-            );
-          }
+          console.log(
+            `Configured ${phoneNumber} with App ${app.application_name}`
+          );
         }
 
         // Configure messaging profile for SMS
@@ -145,7 +144,7 @@ export class TelnyxService {
     if (!telnyx) return null;
     const profileName = "ConnectFlo SMS";
     const smsWebhookUrl =
-      process.env.TELNYX_SMS_WEBHOOK_URL || 
+      process.env.TELNYX_SMS_WEBHOOK_URL ||
       "http://localhost:3002/webhooks/telnyx/sms";
 
     try {

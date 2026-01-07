@@ -109,14 +109,35 @@ function buildTwilioDialTwiml(options: {
 }
 
 function buildTwilioClientOutboundTwiml(options: {
-  callerId: string;
-  toNumber: string;
+  callerId?: string;
+  toNumber?: string;
+  toClient?: string;
 }): string {
-  const callerId = escapeXml(options.callerId);
-  const toNumber = escapeXml(options.toNumber);
+  const toNumber = options.toNumber ? escapeXml(options.toNumber) : "";
+  const toClient = options.toClient ? escapeXml(options.toClient) : "";
+
+  if (toClient) {
+    // For Client-to-Client calls, omit callerId to avoid carrier-style callerId rules interfering.
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial answerOnBridge="true">
+    <Client>${toClient}</Client>
+  </Dial>
+</Response>`;
+  }
+
+  if (!toNumber) {
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Reject/></Response>`;
+  }
+
+  const callerId = String(options.callerId || "").trim();
+  if (!callerId) {
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Reject/></Response>`;
+  }
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial callerId="${callerId}">
+  <Dial callerId="${escapeXml(callerId)}" answerOnBridge="true">
     <Number>${toNumber}</Number>
   </Dial>
 </Response>`;
@@ -1200,14 +1221,12 @@ async function handleTwilioClientVoice(req: Request, res: Response) {
     const parsed = parseTwilioClientIdentity(identity);
 
     const toRaw = String(req.body?.To || req.body?.to || "").trim();
-    const toNumber = normalizeE164Like(toRaw);
-    if (!toNumber) {
-      res.type("text/xml");
-      res.send(
-        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Reject/></Response>`
-      );
-      return;
-    }
+    const toDigitsOnly = toRaw.replace(/[^0-9]/g, "");
+
+    // Treat short digit-only values as internal extensions (e.g. 101, 102, 5432).
+    // This prevents Twilio from trying to dial "102" as a PSTN number.
+    const isExtensionDial = /^[0-9]{2,6}$/.test(toDigitsOnly);
+    const toNumber = isExtensionDial ? "" : normalizeE164Like(toRaw);
 
     if (!parsed?.tenantId || !parsed?.userId) {
       res.type("text/xml");
@@ -1231,6 +1250,48 @@ async function handleTwilioClientVoice(req: Request, res: Response) {
       return;
     }
 
+    // Resolve internal extension target (dial another webphone client)
+    let toClient: string | null = null;
+    if (isExtensionDial) {
+      const targetUser: any = await prisma.user.findFirst({
+        where: {
+          tenantId,
+          extension: toDigitsOnly,
+          extensionEnabled: true,
+        } as any,
+        select: { id: true } as any,
+      });
+
+      if (!targetUser?.id) {
+        res.type("text/xml");
+        res.send(
+          `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Say>That extension is not available.</Say><Reject/></Response>`
+        );
+        return;
+      }
+
+      toClient = toTwilioClientIdentity({
+        tenantId,
+        userId: String(targetUser.id),
+      });
+      console.log("[Twilio] client-voice extension dial:", {
+        tenantId,
+        fromUserId: userId,
+        toExtension: toDigitsOnly,
+        toClient,
+      });
+    } else {
+      // External number validation: reject too-short values (prevents short codes being dialed).
+      const digits = String(toNumber || "").replace(/[^0-9]/g, "");
+      if (!toNumber || digits.length < 10) {
+        res.type("text/xml");
+        res.send(
+          `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Reject/></Response>`
+        );
+        return;
+      }
+    }
+
     // If tenant restricts external forwarding, treat outbound similarly (MVP safety).
     const tenant = await (prisma as any).tenant.findUnique({
       where: { id: tenantId },
@@ -1241,7 +1302,7 @@ async function handleTwilioClientVoice(req: Request, res: Response) {
       },
     });
 
-    if ((tenant as any)?.restrictExternalForwarding) {
+    if (!toClient && (tenant as any)?.restrictExternalForwarding) {
       const allowList = Array.isArray(
         (tenant as any)?.externalForwardingAllowList
       )
@@ -1265,7 +1326,8 @@ async function handleTwilioClientVoice(req: Request, res: Response) {
       tenantId,
       userId,
       configuredNumber: callerId,
-      toNumber,
+      toNumber: toClient ? "(client)" : toNumber,
+      toClient: toClient || undefined,
     });
 
     if (callerId) {
@@ -1315,7 +1377,13 @@ async function handleTwilioClientVoice(req: Request, res: Response) {
     }
 
     res.type("text/xml");
-    res.send(buildTwilioClientOutboundTwiml({ callerId, toNumber }));
+    res.send(
+      buildTwilioClientOutboundTwiml({
+        callerId: toClient ? undefined : callerId,
+        toNumber: toClient ? undefined : toNumber,
+        toClient: toClient || undefined,
+      })
+    );
   } catch (error) {
     console.error("[Twilio] client-voice error:", error);
     res.status(500).send("Internal server error");
@@ -1632,5 +1700,285 @@ export function initializeTwilioWebSocket(server: any) {
 
   return wss; // Return the WebSocket server instance
 }
+
+// Extension Dialing Endpoints
+
+/**
+ * POST /dial-extension
+ * Handle extension-to-extension calls with VoIP-first routing
+ */
+router.post("/dial-extension", async (req: Request, res: Response) => {
+  try {
+    const { toExtension, tenantId, callerId } = req.body;
+
+    if (!toExtension || !tenantId || !callerId) {
+      return res.status(400).send("Missing required parameters");
+    }
+
+    const { ExtensionDirectory } = await import(
+      "../services/extensionDirectory"
+    );
+    const targetUser = await ExtensionDirectory.findByExtension(
+      tenantId,
+      toExtension
+    );
+
+    if (!targetUser) {
+      // Extension not found - play error message
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Extension ${escapeXml(
+    toExtension
+  )} is not available. Please try again.</Say>
+  <Hangup/>
+</Response>`;
+      return res.type("text/xml").send(twiml);
+    }
+
+    // Check if user's web phone is online (VoIP-first)
+    const isOnline = await ExtensionDirectory.isWebPhoneReady(targetUser.id);
+    const clientIdentity = toTwilioClientIdentity({
+      tenantId,
+      userId: targetUser.id,
+    });
+
+    const actionUrl = deriveTwilioDialActionUrl(req, {});
+
+    if (isOnline) {
+      // Route via VoIP (FREE)
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial callerId="${escapeXml(callerId)}" timeout="30" action="${escapeXml(
+        actionUrl
+      )}" method="POST" answerOnBridge="true">
+    <Client>${escapeXml(clientIdentity)}</Client>
+  </Dial>
+</Response>`;
+      res.type("text/xml").send(twiml);
+    } else {
+      // Fallback to PSTN if web phone offline
+      const user = await prisma.user.findUnique({
+        where: { id: targetUser.id },
+        select: { phoneNumber: true, forwardingPhoneNumber: true },
+      });
+
+      const pstnNumber =
+        user?.forwardingPhoneNumber || user?.phoneNumber || null;
+
+      if (pstnNumber) {
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Extension ${escapeXml(
+    toExtension
+  )} is offline. Forwarding to their phone.</Say>
+  <Dial callerId="${escapeXml(callerId)}" timeout="30" action="${escapeXml(
+          actionUrl
+        )}" method="POST" answerOnBridge="true">
+    <Number>${escapeXml(pstnNumber)}</Number>
+  </Dial>
+</Response>`;
+        res.type("text/xml").send(twiml);
+      } else {
+        // No fallback number
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Extension ${escapeXml(
+    toExtension
+  )} is currently unavailable. Please try again later.</Say>
+  <Hangup/>
+</Response>`;
+        res.type("text/xml").send(twiml);
+      }
+    }
+  } catch (error) {
+    console.error("Error in dial-extension:", error);
+    res.type("text/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">An error occurred. Please try again.</Say>
+  <Hangup/>
+</Response>`);
+  }
+});
+
+/**
+ * POST /extension-action
+ * Track extension call outcome and cost
+ */
+router.post("/extension-action", async (req: Request, res: Response) => {
+  try {
+    const { CallSid, DialCallStatus, DialCallDuration } = req.body;
+
+    console.log(
+      `[Extension Action] CallSid=${CallSid}, Status=${DialCallStatus}, Duration=${DialCallDuration}`
+    );
+
+    // Log call outcome (could track VoIP vs PSTN routing here)
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Hangup/>
+</Response>`;
+    res.type("text/xml").send(twiml);
+  } catch (error) {
+    console.error("Error in extension-action:", error);
+    res.type("text/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Hangup/>
+</Response>`);
+  }
+});
+
+/**
+ * POST /blind-transfer
+ * Transfer active call to extension or PSTN number
+ */
+router.post("/blind-transfer", async (req: Request, res: Response) => {
+  try {
+    const { transferTo, tenantId, callerId } = req.body;
+
+    if (!transferTo || !tenantId) {
+      return res.status(400).send("Missing required parameters");
+    }
+
+    // Check if transferTo is extension (3-4 digits) or PSTN number
+    const isExtension = /^\d{3,4}$/.test(transferTo);
+
+    const actionUrl = deriveTwilioDialActionUrl(req, {});
+
+    if (isExtension) {
+      // Transfer to extension
+      const { ExtensionDirectory } = await import(
+        "../services/extensionDirectory"
+      );
+      const targetUser = await ExtensionDirectory.findByExtension(
+        tenantId,
+        transferTo
+      );
+
+      if (!targetUser) {
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Extension ${escapeXml(
+    transferTo
+  )} is not available.</Say>
+  <Hangup/>
+</Response>`;
+        return res.type("text/xml").send(twiml);
+      }
+
+      // Try VoIP first
+      const isOnline = await ExtensionDirectory.isWebPhoneReady(targetUser.id);
+      const clientIdentity = toTwilioClientIdentity({
+        tenantId,
+        userId: targetUser.id,
+      });
+
+      if (isOnline) {
+        // VoIP transfer (FREE)
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Transferring to extension ${escapeXml(
+    transferTo
+  )}.</Say>
+  <Dial callerId="${escapeXml(
+    callerId || ""
+  )}" timeout="30" action="${escapeXml(actionUrl)}" method="POST">
+    <Client>${escapeXml(clientIdentity)}</Client>
+  </Dial>
+</Response>`;
+        res.type("text/xml").send(twiml);
+      } else {
+        // PSTN fallback
+        const user = await prisma.user.findUnique({
+          where: { id: targetUser.id },
+          select: { phoneNumber: true, forwardingPhoneNumber: true },
+        });
+
+        const pstnNumber =
+          user?.forwardingPhoneNumber || user?.phoneNumber || null;
+
+        if (pstnNumber) {
+          const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Transferring to extension ${escapeXml(
+    transferTo
+  )}.</Say>
+  <Dial callerId="${escapeXml(
+    callerId || ""
+  )}" timeout="30" action="${escapeXml(actionUrl)}" method="POST">
+    <Number>${escapeXml(pstnNumber)}</Number>
+  </Dial>
+</Response>`;
+          res.type("text/xml").send(twiml);
+        } else {
+          const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Extension ${escapeXml(
+    transferTo
+  )} is unavailable.</Say>
+  <Hangup/>
+</Response>`;
+          res.type("text/xml").send(twiml);
+        }
+      }
+    } else {
+      // Transfer to PSTN number
+      const normalizedNumber = normalizeE164Like(transferTo);
+
+      if (!normalizedNumber) {
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Invalid transfer number.</Say>
+  <Hangup/>
+</Response>`;
+        return res.type("text/xml").send(twiml);
+      }
+
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Transferring your call.</Say>
+  <Dial callerId="${escapeXml(
+    callerId || ""
+  )}" timeout="30" action="${escapeXml(actionUrl)}" method="POST">
+    <Number>${escapeXml(normalizedNumber)}</Number>
+  </Dial>
+</Response>`;
+      res.type("text/xml").send(twiml);
+    }
+  } catch (error) {
+    console.error("Error in blind-transfer:", error);
+    res.type("text/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Transfer failed. Please try again.</Say>
+  <Hangup/>
+</Response>`);
+  }
+});
+
+/**
+ * POST /transfer-action
+ * Track transfer outcome and cost
+ */
+router.post("/transfer-action", async (req: Request, res: Response) => {
+  try {
+    const { CallSid, DialCallStatus, DialCallDuration } = req.body;
+
+    console.log(
+      `[Transfer Action] CallSid=${CallSid}, Status=${DialCallStatus}, Duration=${DialCallDuration}`
+    );
+
+    // Could log transfer success/failure and cost here
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Hangup/>
+</Response>`;
+    res.type("text/xml").send(twiml);
+  } catch (error) {
+    console.error("Error in transfer-action:", error);
+    res.type("text/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Hangup/>
+</Response>`);
+  }
+});
 
 export default router;

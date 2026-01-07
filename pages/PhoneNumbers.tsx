@@ -98,7 +98,6 @@ const PhoneNumbers: React.FC = () => {
       const user = JSON.parse(userStr);
       userRole = user?.role || null;
       isSuperAdmin = userRole === "SUPER_ADMIN";
-      console.log("User role:", user?.role, "isSuperAdmin:", isSuperAdmin);
     }
   } catch (error) {
     console.error("Failed to parse user from localStorage:", error);
@@ -354,7 +353,6 @@ const PhoneNumbers: React.FC = () => {
         selectedProvider
       );
       // Map results to PhoneNumber type
-      console.log("Search Results:", results);
       const mappedResults = results.map((r: any) => {
         let regionStr = "Unknown";
         let countryStr = searchCountry;

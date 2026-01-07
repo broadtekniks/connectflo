@@ -56,7 +56,7 @@ const Inbox: React.FC = () => {
     });
 
     return () => {
-      socketService.disconnect();
+      socketService.offNewMessage();
     };
   }, []);
 

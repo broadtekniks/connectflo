@@ -4,6 +4,7 @@ import Inbox from "./pages/Inbox";
 import Dashboard from "./pages/Dashboard";
 import AgentDashboard from "./pages/AgentDashboard";
 import Settings from "./pages/Settings";
+import SecuritySettings from "./pages/SecuritySettings";
 import Integrations from "./pages/Integrations";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import PhoneNumbers from "./pages/PhoneNumbers";
@@ -11,6 +12,7 @@ import Workflows from "./pages/Workflows";
 import WebsiteHome from "./pages/WebsiteHome";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
+import VerifyEmail from "./pages/VerifyEmail";
 import Pricing from "./pages/Pricing";
 import Privacy from "./pages/Privacy";
 import Security from "./pages/Security";
@@ -28,6 +30,7 @@ import CallLogs from "./pages/CallLogs";
 import Feedback from "./pages/Feedback";
 import WebPhoneDialer from "./components/WebPhoneDialer";
 import { api } from "./services/api";
+import { socketService } from "./services/socket";
 
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -59,6 +62,7 @@ const App: React.FC = () => {
     if (path.startsWith("/team")) return "team";
     if (path.startsWith("/billing")) return "billing";
     if (path.startsWith("/settings")) return "settings";
+    if (path.startsWith("/security-settings")) return "security-settings";
     if (path.startsWith("/tenants")) return "tenants";
     if (path.startsWith("/test-chat")) return "test-chat";
     return "dashboard";
@@ -68,6 +72,7 @@ const App: React.FC = () => {
     const path = (pathname || "/").toLowerCase();
     if (path.startsWith("/login")) return "login";
     if (path.startsWith("/signup")) return "signup";
+    if (path.startsWith("/verify-email")) return "verify-email";
     if (path.startsWith("/pricing")) return "pricing";
     if (path.startsWith("/privacy")) return "privacy";
     if (path.startsWith("/security")) return "security";
@@ -93,6 +98,7 @@ const App: React.FC = () => {
       team: "/team",
       billing: "/billing",
       settings: "/settings",
+      "security-settings": "/security-settings",
       "test-chat": "/test-chat",
     };
 
@@ -129,12 +135,22 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isLoggedIn) return;
 
+    // Keep a single Socket.IO connection for the whole session.
+    // Individual pages should add/remove listeners but not disconnect the socket.
+    socketService.connect();
+
     // Agents need this flag to decide whether the dialer should show.
     api.tenants
       .getWebPhoneSettings()
       .then((data) => setWebPhoneEnabled(Boolean(data?.webPhoneEnabled)))
       .catch(() => setWebPhoneEnabled(false));
   }, [isLoggedIn]);
+
+  useEffect(() => {
+    return () => {
+      socketService.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     // Keep view in sync with browser navigation (back/forward).
@@ -180,6 +196,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
+    socketService.disconnect();
     setIsLoggedIn(false);
     setCurrentView("dashboard");
     setPublicView("home");
@@ -261,6 +278,8 @@ const App: React.FC = () => {
         return <Billing />;
       case "settings":
         return <Settings />;
+      case "security-settings":
+        return <SecuritySettings />;
       case "test-chat":
         return <TestChat />;
       default:
@@ -291,6 +310,8 @@ const App: React.FC = () => {
         return <Login onLogin={handleLogin} onNavigate={setPublicView} />;
       case "signup":
         return <Signup onSignup={handleLogin} onNavigate={setPublicView} />;
+      case "verify-email":
+        return <VerifyEmail onNavigate={setPublicView} />;
       case "pricing":
         return <Pricing onNavigate={setPublicView} />;
       case "privacy":

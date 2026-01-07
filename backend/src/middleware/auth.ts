@@ -20,8 +20,15 @@ export const authenticateToken = (
   }
 
   try {
-    const verified = jwt.verify(token, JWT_SECRET);
-    req.user = verified;
+    const verified = jwt.verify(token, JWT_SECRET) as any;
+
+    // Normalize JWT payload shape across the app.
+    // Some tokens use `userId`, while some code expects `id`.
+    const normalized = { ...verified } as any;
+    if (!normalized.id && normalized.userId) normalized.id = normalized.userId;
+    if (!normalized.userId && normalized.id) normalized.userId = normalized.id;
+
+    req.user = normalized;
     next();
   } catch (error) {
     res.status(403).json({ error: "Invalid token" });

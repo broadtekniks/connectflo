@@ -63,4 +63,67 @@ router.post("/voice-token", async (req: AuthRequest, res: Response) => {
   }
 });
 
+/**
+ * POST /api/twilio/transfer
+ * Initiate call transfer to extension or PSTN number
+ */
+router.post("/transfer", async (req: AuthRequest, res: Response) => {
+  try {
+    const { callSid, transferTo } = req.body;
+    const tenantId = req.user?.tenantId;
+    const userId = req.user?.userId;
+
+    if (!callSid || !transferTo || !tenantId) {
+      return res.status(400).json({
+        error: "Missing callSid, transferTo, or tenantId",
+      });
+    }
+
+    const accountSid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+    const authToken = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
+
+    if (!accountSid || !authToken) {
+      return res.status(500).json({
+        error: "Twilio credentials not configured",
+      });
+    }
+
+    const client = twilio(accountSid, authToken);
+
+    // Get the phone number associated with the tenant for caller ID
+    const prisma = (await import("../lib/prisma")).default;
+    const phoneNumber = await prisma.phoneNumber.findFirst({
+      where: { tenantId },
+      select: { number: true },
+    });
+
+    const callerId = phoneNumber?.number || undefined;
+
+    // Update the call to redirect to the transfer webhook
+    const baseUrl = String(process.env.BASE_URL || "").trim();
+    const transferUrl = `${baseUrl}/webhooks/twilio/blind-transfer`;
+
+    await client.calls(callSid).update({
+      twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Redirect method="POST">${transferUrl}?transferTo=${encodeURIComponent(
+        transferTo
+      )}&tenantId=${encodeURIComponent(tenantId)}&callerId=${encodeURIComponent(
+        callerId || ""
+      )}</Redirect>
+</Response>`,
+    });
+
+    return res.json({
+      success: true,
+      message: "Transfer initiated",
+    });
+  } catch (error: any) {
+    console.error("Failed to initiate transfer:", error);
+    return res.status(500).json({
+      error: error.message || "Failed to initiate transfer",
+    });
+  }
+});
+
 export default router;

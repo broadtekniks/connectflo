@@ -24,6 +24,21 @@ model User {
   timeZone              String?
   agentTimeZone         String?        // Agent's timezone for scheduling
   workingHours          Json?          // Agent's working hours
+  googleId              String?        @unique // Google OAuth ID for SSO
+  emailVerified         Boolean        @default(false) // Email verification status
+  emailVerificationToken String?      @unique // Token for email verification
+  verificationTokenExpiry DateTime?   // Expiry time for verification token
+  phoneVerified         Boolean        @default(false) // Phone verification status (Level 2)
+  phoneVerificationCode String?       // SMS OTP code for phone verification
+  phoneVerificationExpiry DateTime?   // Expiry time for phone verification code
+  mfaEnabled            Boolean        @default(false) // TOTP MFA enabled status (Level 3)
+  mfaSecret             String?        // TOTP secret key (encrypted)
+  mfaBackupCodes        String[]       @default([]) // One-time backup codes
+  extension             String?        @db.VarChar(10) // Extension number (e.g., "101", "5432")
+  extensionEnabled      Boolean        @default(true) // Allow others to dial this extension
+  extensionLabel        String?        @db.VarChar(100) // Display label for extension
+  webPhoneStatus        WebPhoneStatus @default(OFFLINE) // Web phone presence status
+  webPhoneLastSeen      DateTime?      // Last time web phone was online
   createdAt             DateTime       @default(now())
   updatedAt             DateTime       @updatedAt
   assignedConversations Conversation[] @relation("AssignedAgent")
@@ -39,6 +54,9 @@ model User {
   assignedWorkflows     Workflow[]     @relation("AssignedAgent")
 
   callGroupMemberships  CallGroupMember[]
+
+  @@unique([tenantId, extension])
+  @@index([extension])
 }
 
 model Conversation {
@@ -501,6 +519,13 @@ model CallLog {
   outcome           String?
   metadata          Json?
   conversationId    String?
+  fromExtension     String?      @db.VarChar(10)
+  toExtension       String?      @db.VarChar(10)
+  fromUserId        String?
+  toUserId          String?
+  callType          CallType     @default(EXTERNAL)
+  cost              Float        @default(0)
+  endedAt           DateTime?
   createdAt         DateTime     @default(now())
   tenant            Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer          User?        @relation("CallCustomer", fields: [customerId], references: [id])
@@ -510,6 +535,10 @@ model CallLog {
   @@index([customerId])
   @@index([callSid])
   @@index([phoneNumberId])
+  @@index([fromExtension])
+  @@index([toExtension])
+  @@index([fromUserId])
+  @@index([toUserId])
 }
 
 model AppointmentLog {
@@ -555,4 +584,17 @@ model FeedbackLog {
   @@index([tenantId, createdAt])
   @@index([customerId])
   @@index([rating])
+}
+
+enum WebPhoneStatus {
+  ONLINE
+  BUSY
+  AWAY
+  OFFLINE
+}
+
+enum CallType {
+  EXTERNAL
+  INTERNAL_VOIP
+  INTERNAL_PSTN
 }

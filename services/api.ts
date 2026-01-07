@@ -642,6 +642,91 @@ export const api = {
       }
       return response.json();
     },
+    googleAuth: async (credential: string, companyName?: string) => {
+      const response = await fetch(`${API_URL}/auth/google`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential, companyName }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      return data;
+    },
+  },
+
+  security: {
+    sendPhoneVerification: async () => {
+      const response = await fetch(`${API_URL}/auth/send-phone-verification`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to send verification code");
+      }
+      return response.json();
+    },
+    verifyPhone: async (code: string) => {
+      const response = await fetch(`${API_URL}/auth/verify-phone`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to verify phone");
+      }
+      return response.json();
+    },
+    setupMFA: async () => {
+      const response = await fetch(`${API_URL}/auth/mfa/setup`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to setup MFA");
+      }
+      return response.json();
+    },
+    verifyMFASetup: async (code: string) => {
+      const response = await fetch(`${API_URL}/auth/mfa/verify-setup`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to verify MFA setup");
+      }
+      return response.json();
+    },
+    verifyMFA: async (code: string) => {
+      const response = await fetch(`${API_URL}/auth/mfa/verify`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to verify MFA code");
+      }
+      return response.json();
+    },
+    disableMFA: async (code: string) => {
+      const response = await fetch(`${API_URL}/auth/mfa/disable`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to disable MFA");
+      }
+      return response.json();
+    },
   },
 
   messages: {
@@ -1208,6 +1293,26 @@ export const api = {
     });
     if (!response.ok) {
       let message = `PUT ${endpoint} failed`;
+      try {
+        const err = await response.json();
+        if (err?.error) message = String(err.error);
+      } catch {
+        // ignore
+      }
+
+      handleAuthFailureIfNeeded(response.status, message);
+      throw new Error(message);
+    }
+    return response.json();
+  },
+
+  delete: async (endpoint: string) => {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      method: "DELETE",
+      headers: authHeader(),
+    });
+    if (!response.ok) {
+      let message = `DELETE ${endpoint} failed`;
       try {
         const err = await response.json();
         if (err?.error) message = String(err.error);

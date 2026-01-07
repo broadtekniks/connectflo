@@ -223,7 +223,6 @@ const TeamMembers: React.FC = () => {
 
     return () => {
       socketService.offTeamMemberCheckinUpdated();
-      socketService.disconnect();
     };
   }, []);
 

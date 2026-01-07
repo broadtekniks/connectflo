@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Mail,
   Lock,
@@ -11,6 +11,12 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
+
 interface LoginProps {
   onLogin: () => void;
   onNavigate: (view: string) => void;
@@ -22,11 +28,27 @@ const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showResendVerification, setShowResendVerification] = useState(false);
+  const [resendEmail, setResendEmail] = useState("");
+
+  useEffect(() => {
+    // Load Google Sign-In script
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    document.body.appendChild(script);
+
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    setShowResendVerification(false);
 
     try {
       const response = await api.auth.login({ email, password });
@@ -34,10 +56,112 @@ const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
       localStorage.setItem("user", JSON.stringify(response.user));
       onLogin();
     } catch (err: any) {
-      setError(err.response?.data?.error || "Invalid email or password");
+      const errorData = err.response?.data;
+      if (errorData?.code === "EMAIL_NOT_VERIFIED") {
+        setError(errorData.error);
+        setShowResendVerification(true);
+        setResendEmail(errorData.email || email);
+      } else {
+        setError(
+          err.response?.data?.error ||
+            err.message ||
+            "Invalid email or password"
+        );
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleResendVerification = async () => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        "http://localhost:3002/api/auth/resend-verification",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: resendEmail }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setError("Verification email sent! Please check your inbox.");
+        setShowResendVerification(false);
+      } else {
+        setError(data.error || "Failed to resend verification email");
+      }
+    } catch (err) {
+      setError("Failed to resend verification email. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async (credential: string) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await api.auth.googleAuth(credential);
+      localStorage.setItem("token", response.token);
+      localStorage.setItem("user", JSON.stringify(response.user));
+      onLogin();
+    } catch (err: any) {
+      if (err.requiresCompanyName) {
+        // New user - redirect to signup
+        onNavigate("signup");
+      } else {
+        setError(err.error || "Google authentication failed");
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const initiateGoogleSignIn = () => {
+    if (!window.google) {
+      setError("Google Sign-In not loaded. Please refresh the page.");
+      return;
+    }
+
+    const clientId = (import.meta as any).env.VITE_GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      setError(
+        "Google Client ID not configured. Please set VITE_GOOGLE_CLIENT_ID in .env file."
+      );
+      return;
+    }
+
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: (response: any) => handleGoogleLogin(response.credential),
+      ux_mode: "popup", // Use popup instead of redirect
+    });
+
+    // Render a temporary button and click it programmatically
+    const buttonDiv = document.createElement("div");
+    buttonDiv.style.display = "none";
+    document.body.appendChild(buttonDiv);
+
+    window.google.accounts.id.renderButton(buttonDiv, {
+      type: "standard",
+      size: "large",
+    });
+
+    // Find and click the button
+    setTimeout(() => {
+      const btn = buttonDiv.querySelector('div[role="button"]') as HTMLElement;
+      if (btn) {
+        btn.click();
+      }
+      // Clean up
+      setTimeout(() => document.body.removeChild(buttonDiv), 1000);
+    }, 100);
   };
 
   return (
@@ -92,9 +216,21 @@ const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
           </div>
 
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3 text-red-700">
-              <AlertCircle size={20} />
-              <p className="text-sm">{error}</p>
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <div className="flex items-center gap-3 text-red-700 mb-2">
+                <AlertCircle size={20} />
+                <p className="text-sm">{error}</p>
+              </div>
+              {showResendVerification && (
+                <button
+                  type="button"
+                  onClick={handleResendVerification}
+                  disabled={isLoading}
+                  className="mt-2 text-sm font-semibold text-indigo-600 hover:text-indigo-700 disabled:opacity-50"
+                >
+                  Resend verification email
+                </button>
+              )}
             </div>
           )}
 
@@ -177,10 +313,19 @@ const Login: React.FC<LoginProps> = ({ onLogin, onNavigate }) => {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <button className="flex items-center justify-center gap-2 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors font-medium text-slate-700 text-sm">
+            <button
+              type="button"
+              onClick={initiateGoogleSignIn}
+              disabled={isLoading}
+              className="flex items-center justify-center gap-2 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors font-medium text-slate-700 text-sm disabled:opacity-50"
+            >
               <Chrome size={18} /> Google
             </button>
-            <button className="flex items-center justify-center gap-2 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors font-medium text-slate-700 text-sm">
+            <button
+              type="button"
+              disabled
+              className="flex items-center justify-center gap-2 py-2.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors font-medium text-slate-400 text-sm opacity-50 cursor-not-allowed"
+            >
               <Github size={18} /> GitHub
             </button>
           </div>
