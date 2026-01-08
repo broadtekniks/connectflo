@@ -192,6 +192,7 @@ model Workflow {
   phoneVoiceId       String?
   phoneVoiceLanguage String?
   toneOfVoice        String?
+  labels             Json?                 @default("[]")
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   aiConfig           AiConfig?             @relation(fields: [aiConfigId], references: [id])
   assignedAgent      User?                 @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
@@ -280,6 +281,7 @@ model Tenant {
   appointmentLogs     AppointmentLog[]
   feedbackLogs        FeedbackLog[]
   smsOptOuts          SmsOptOut[]
+  crmConnections      CrmConnection[]
 
   callGroups          CallGroup[]
 }
@@ -624,4 +626,115 @@ enum CallType {
   EXTERNAL
   INTERNAL_VOIP
   INTERNAL_PSTN
+}
+
+// CRM Integration Models
+model CrmConnection {
+  id                String                 @id @default(uuid())
+  tenantId          String
+  crmType           String                 // 'hubspot', 'salesforce', 'zoho', 'odoo'
+  name              String                 // User-friendly name
+  credentials       String                 // Encrypted OAuth tokens/API keys
+  config            Json?                  // Instance URL, domain, custom settings
+  status            String                 @default("active") // 'active', 'error', 'disabled'
+  lastSyncAt        DateTime?
+  errorMessage      String?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  tenant            Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fieldMappings     CrmFieldMapping[]
+  syncRecords       CrmSyncRecord[]
+  syncJobs          CrmSyncJob[]
+  webhookSubscriptions CrmWebhookSubscription[]
+  discoveredFields  CrmDiscoveredField[]
+
+  @@unique([tenantId, crmType])
+  @@index([tenantId])
+}
+
+model CrmDiscoveredField {
+  id              String        @id @default(uuid())
+  connectionId    String
+  objectType      String        // 'contact', 'company', 'deal', 'activity'
+  fieldName       String        // Field name in CRM (e.g., 'email', 'phone', 'custom_field__c')
+  fieldLabel      String        // Human-readable label
+  fieldType       String        // 'string', 'number', 'boolean', 'date', 'picklist', 'textarea'
+  isRequired      Boolean       @default(false)
+  isCustom        Boolean       @default(false)
+  picklistValues  Json?         // For picklist/dropdown fields
+  description     String?
+  isReadOnly      Boolean       @default(false)
+  lastDiscoveredAt DateTime     @default(now())
+  connection      CrmConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, objectType, fieldName])
+  @@index([connectionId, objectType])
+}
+
+model CrmFieldMapping {
+  id              String        @id @default(uuid())
+  connectionId    String
+  objectType      String        // 'contact', 'company', 'deal', 'activity'
+  crmField        String        // Field name in CRM
+  internalField   String        // Field name in our system
+  direction       String        @default("both") // 'in', 'out', 'both'
+  transformFunction String?     // Optional JS function for data transformation
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  connection      CrmConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, objectType, crmField])
+  @@index([connectionId])
+}
+
+model CrmSyncRecord {
+  id            String        @id @default(uuid())
+  connectionId  String
+  objectType    String        // 'contact', 'company', 'deal', 'activity'
+  crmId         String        // ID in external CRM
+  internalId    String        // ID in our system (User.id for contacts, etc.)
+  lastSyncedAt  DateTime      @default(now())
+  syncHash      String?       // Hash of data to detect changes
+  createdAt     DateTime      @default(now())
+  connection    CrmConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, objectType, crmId])
+  @@index([connectionId, objectType])
+  @@index([internalId])
+}
+
+model CrmSyncJob {
+  id            String        @id @default(uuid())
+  connectionId  String
+  jobType       String        // 'full_sync', 'incremental', 'webhook', 'activity_log', 'discover_fields'
+  objectType    String?       // 'contact', 'company', 'deal'
+  status        String        @default("pending") // 'pending', 'processing', 'completed', 'failed'
+  payload       Json?
+  result        Json?
+  errorMessage  String?
+  retryCount    Int           @default(0)
+  maxRetries    Int           @default(3)
+  scheduledAt   DateTime      @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime      @default(now())
+  connection    CrmConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, status, scheduledAt])
+}
+
+model CrmWebhookSubscription {
+  id            String        @id @default(uuid())
+  connectionId  String
+  webhookId     String?       // ID from CRM provider
+  objectType    String        // 'contact', 'company', 'deal'
+  eventTypes    String[]      // ['created', 'updated', 'deleted']
+  webhookUrl    String
+  secret        String?       // For webhook signature verification
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  connection    CrmConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
 }

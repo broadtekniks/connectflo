@@ -13,6 +13,7 @@ import { GoogleSheetsService } from "./integrations/google/sheets";
 import { buildIcsInvite } from "./calendarInvite";
 import { DateTime } from "luxon";
 import { isTenantOpenNow } from "./businessHours";
+import { CRMService } from "./crm";
 
 export type WorkflowTriggerResult =
   | { status: "no_workflow"; reason: "not_found" }
@@ -82,39 +83,58 @@ export class WorkflowEngine {
   private checkWithinWorkingHours(
     startTime: string,
     endTime: string,
-    workingHours: Record<string, { start: string; end: string } | null>,
+    workingHours: any,
     workingHoursTimeZone: string
   ): boolean {
-    const start = DateTime.fromISO(startTime, { zone: workingHoursTimeZone });
-    const end = DateTime.fromISO(endTime, { zone: workingHoursTimeZone });
+    if (!workingHours || typeof workingHours !== "object") return false;
+
+    let start = DateTime.fromISO(startTime, { zone: workingHoursTimeZone });
+    let end = DateTime.fromISO(endTime, { zone: workingHoursTimeZone });
 
     if (!start.isValid || !end.isValid) {
       return false;
     }
 
-    // Get day of week (lowercase: monday, tuesday, etc.)
-    const dayOfWeek = start.weekdayLong?.toLowerCase();
-    if (!dayOfWeek) return false;
+    const hasDaysObject = (raw: any): raw is { days: Record<string, any> } =>
+      Boolean(raw && typeof raw === "object" && raw.days && typeof raw.days === "object");
 
-    // Get working hours for this day
-    const dayHours = workingHours[dayOfWeek];
-    if (!dayHours || !dayHours.start || !dayHours.end) {
-      // Day is not configured or marked as closed
+    const weekdayShort = start.toFormat("ccc").toLowerCase();
+    const weekdayLong = (start.weekdayLong || "").toLowerCase();
+
+    let dayConfig: any;
+    if (hasDaysObject(workingHours)) {
+      dayConfig = workingHours.days?.[weekdayShort];
+      if (!dayConfig?.enabled) return false;
+    } else {
+      dayConfig = workingHours?.[weekdayLong] ?? workingHours?.[weekdayShort];
+    }
+
+    const dayStart = String(dayConfig?.start || "").trim();
+    const dayEnd = String(dayConfig?.end || "").trim();
+    if (!dayStart || !dayEnd) return false;
+
+    const [startHour, startMin] = dayStart.split(":").map(Number);
+    const [endHour, endMin] = dayEnd.split(":").map(Number);
+    if (
+      Number.isNaN(startHour) ||
+      Number.isNaN(startMin) ||
+      Number.isNaN(endHour) ||
+      Number.isNaN(endMin)
+    ) {
       return false;
     }
 
-    // Parse working hours times (format: "HH:mm")
-    const [startHour, startMin] = dayHours.start.split(":").map(Number);
-    const [endHour, endMin] = dayHours.end.split(":").map(Number);
+    const workStart = start.set({ hour: startHour, minute: startMin, second: 0 });
+    let workEnd = start.set({ hour: endHour, minute: endMin, second: 0 });
 
-    const workStart = start.set({
-      hour: startHour,
-      minute: startMin,
-      second: 0,
-    });
-    const workEnd = start.set({ hour: endHour, minute: endMin, second: 0 });
+    // Handle overnight shifts (e.g., 22:00 -> 06:00)
+    if (workEnd <= workStart) {
+      workEnd = workEnd.plus({ days: 1 });
+      if (end <= start) {
+        end = end.plus({ days: 1 });
+      }
+    }
 
-    // Check if appointment is within working hours
     return start >= workStart && end <= workEnd;
   }
 
@@ -163,6 +183,7 @@ export class WorkflowEngine {
           name: true,
           agentTimeZone: true,
           workingHours: true,
+          businessHours: true,
         },
       },
       phoneNumbers: {
@@ -331,6 +352,12 @@ export class WorkflowEngine {
       resources: {
         aiConfig: (workflow as any).aiConfig,
         assignedAgent: (workflow as any).assignedAgent || undefined,
+        workflow: {
+          id: workflow.id,
+          name: workflow.name,
+          businessTimeZone: (workflow as any).businessTimeZone,
+          businessHours: (workflow as any).businessHours,
+        },
         phoneNumbers: (workflow as any).phoneNumbers.map(
           (wp: any) => wp.phoneNumber
         ),
@@ -914,9 +941,21 @@ export class WorkflowEngine {
             },
           });
 
-          const workingHours =
-            assignedAgent?.workingHours || tenantPrefs?.businessHours;
+          const workflowHours = (context.resources as any)?.workflow?.businessHours;
+          const workflowTz = (context.resources as any)?.workflow?.businessTimeZone;
+
+          const hasDaysObject = (raw: any): boolean => {
+            if (!raw || typeof raw !== "object") return false;
+            const days = (raw as any).days;
+            return Boolean(days && typeof days === "object");
+          };
+
+          const workingHours = hasDaysObject(workflowHours)
+            ? workflowHours
+            : assignedAgent?.workingHours || tenantPrefs?.businessHours;
+
           const workingHoursTimeZone =
+            String((workflowTz || "").trim()) ||
             assignedAgent?.agentTimeZone ||
             tenantPrefs?.businessTimeZone ||
             timeZone;
@@ -1096,6 +1135,271 @@ export class WorkflowEngine {
             "[WorkflowEngine] Failed to send calendar invite:",
             error
           );
+        }
+        break;
+
+      // HubSpot (CRM) Actions
+      case "HubSpot":
+      case "HubSpot Search":
+      case "HubSpot Create":
+      case "HubSpot Update":
+      case "HubSpot Get":
+      case "HubSpot Log Activity":
+        try {
+          const tenantId = context.execution.tenantId;
+
+          const connection = await prisma.crmConnection.findFirst({
+            where: {
+              tenantId,
+              crmType: "hubspot",
+              status: "active",
+            },
+            orderBy: { updatedAt: "desc" },
+          });
+
+          if (!connection) {
+            const msg =
+              "HubSpot is not connected for this tenant (or connection is not active).";
+            console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
+            variableResolver.set("variables.workflow.hubspotError", msg, context);
+            (context as any).hubspot = (context as any).hubspot || {};
+            (context as any).hubspot.error = msg;
+            break;
+          }
+
+          const provider = await CRMService.getProvider(connection.id);
+
+          const actionFromLabel = (): string => {
+            const label = String(node.label || "").toLowerCase();
+            if (label.includes("search")) return "search";
+            if (label.includes("create")) return "create";
+            if (label.includes("update")) return "update";
+            if (label.includes("log")) return "logActivity";
+            if (label.includes("get")) return "getById";
+            return "create";
+          };
+
+          const action = String(config?.action || actionFromLabel()).trim();
+          const objectType = String(config?.objectType || "contact")
+            .trim()
+            .toLowerCase();
+
+          (context as any).hubspot = (context as any).hubspot || {};
+          (context as any).hubspot.connectionId = connection.id;
+          (context as any).hubspot.lastAction = { action, objectType };
+          variableResolver.set(
+            "variables.workflow.hubspotLastAction",
+            { action, objectType },
+            context
+          );
+
+          if (action === "search") {
+            if (objectType === "contact") {
+              const email = String(config?.email || context.customer?.email || "").trim();
+              const phone = String(config?.phone || context.customer?.phone || "").trim();
+              const firstName = String(config?.firstName || "").trim();
+              const lastName = String(config?.lastName || "").trim();
+              const name = String([firstName, lastName].filter(Boolean).join(" ") || config?.name || context.customer?.name || "").trim();
+
+              const results = await provider.searchContacts({
+                ...(email ? { email } : {}),
+                ...(phone ? { phone } : {}),
+                ...(!email && !phone && name ? { name } : {}),
+              });
+
+              (context as any).hubspot.contactSearchResults = results;
+              (context as any).hubspot.contact = results?.[0] || null;
+              variableResolver.set(
+                "variables.workflow.hubspotContactSearchResults",
+                results,
+                context
+              );
+            } else if (objectType === "company") {
+              const name = String(config?.companyName || config?.company || "").trim();
+              const domain = String(config?.domain || "").trim();
+              const results = await provider.searchCompanies({
+                ...(name ? { name } : {}),
+                ...(domain ? { domain } : {}),
+              });
+
+              (context as any).hubspot.companySearchResults = results;
+              (context as any).hubspot.company = results?.[0] || null;
+              variableResolver.set(
+                "variables.workflow.hubspotCompanySearchResults",
+                results,
+                context
+              );
+            } else if (objectType === "deal") {
+              const stage = String(config?.stage || "").trim();
+              const contactId =
+                String(config?.contactId || (context as any)?.hubspot?.contact?.id || "").trim() ||
+                undefined;
+              const companyId =
+                String(config?.companyId || (context as any)?.hubspot?.company?.id || "").trim() ||
+                undefined;
+              const results = await provider.searchDeals({
+                ...(contactId ? { contactId } : {}),
+                ...(companyId ? { companyId } : {}),
+                ...(stage ? { stage } : {}),
+              });
+              (context as any).hubspot.dealSearchResults = results;
+              (context as any).hubspot.deal = results?.[0] || null;
+              variableResolver.set(
+                "variables.workflow.hubspotDealSearchResults",
+                results,
+                context
+              );
+            }
+          } else if (action === "create") {
+            if (objectType === "contact") {
+              const email = String(config?.email || context.customer?.email || "").trim();
+              const contact = await provider.createContact({
+                ...(email ? { email } : {}),
+                ...(String(config?.firstName || "").trim()
+                  ? { firstName: String(config.firstName).trim() }
+                  : {}),
+                ...(String(config?.lastName || "").trim()
+                  ? { lastName: String(config.lastName).trim() }
+                  : {}),
+                ...(String(config?.phone || context.customer?.phone || "").trim()
+                  ? { phone: String(config.phone || context.customer?.phone).trim() }
+                  : {}),
+                ...(String(config?.company || "").trim()
+                  ? { company: String(config.company).trim() }
+                  : {}),
+              });
+              (context as any).hubspot.contact = contact;
+              variableResolver.set(
+                "variables.workflow.hubspotContactId",
+                contact?.id,
+                context
+              );
+            } else if (objectType === "company") {
+              const name = String(config?.companyName || config?.company || "").trim();
+              const domain = String(config?.domain || "").trim() || undefined;
+              const phone = String(config?.phone || "").trim() || undefined;
+              const company = await provider.createCompany({
+                ...(name ? { name } : { name: "New Company" }),
+                ...(domain ? { domain } : {}),
+                ...(phone ? { phone } : {}),
+              } as any);
+              (context as any).hubspot.company = company;
+              variableResolver.set(
+                "variables.workflow.hubspotCompanyId",
+                company?.id,
+                context
+              );
+            } else if (objectType === "deal") {
+              const name = String(config?.dealName || "").trim() || "New Deal";
+              const amountRaw = String(config?.amount || "").trim();
+              const amount = amountRaw ? Number(amountRaw) : undefined;
+              const stage = String(config?.stage || "").trim() || undefined;
+              const closeDate = String(config?.closeDate || "").trim() || undefined;
+              const deal = await provider.createDeal({
+                name,
+                ...(typeof amount === "number" && !Number.isNaN(amount) ? { amount } : {}),
+                ...(stage ? { stage } : {}),
+                ...(closeDate ? { closeDate } : {}),
+              } as any);
+              (context as any).hubspot.deal = deal;
+              variableResolver.set(
+                "variables.workflow.hubspotDealId",
+                deal?.id,
+                context
+              );
+            }
+          } else if (action === "getById") {
+            const recordId = String(config?.recordId || "").trim();
+            if (!recordId) {
+              const msg = "HubSpot Get by ID requires a recordId.";
+              console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
+              variableResolver.set("variables.workflow.hubspotError", msg, context);
+              break;
+            }
+
+            if (objectType === "contact") {
+              const contact = await provider.getContact(recordId);
+              (context as any).hubspot.contact = contact;
+            } else if (objectType === "company") {
+              const company = await provider.getCompany(recordId);
+              (context as any).hubspot.company = company;
+            } else if (objectType === "deal") {
+              const deal = await provider.getDeal(recordId);
+              (context as any).hubspot.deal = deal;
+            }
+          } else if (action === "update") {
+            const recordId = String(config?.recordId || "").trim();
+            if (!recordId) {
+              const msg = "HubSpot Update requires a recordId.";
+              console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
+              variableResolver.set("variables.workflow.hubspotError", msg, context);
+              break;
+            }
+
+            if (objectType === "contact") {
+              const contact = await provider.updateContact(recordId, {
+                ...(String(config?.email || "").trim() ? { email: String(config.email).trim() } : {}),
+                ...(String(config?.firstName || "").trim() ? { firstName: String(config.firstName).trim() } : {}),
+                ...(String(config?.lastName || "").trim() ? { lastName: String(config.lastName).trim() } : {}),
+                ...(String(config?.phone || "").trim() ? { phone: String(config.phone).trim() } : {}),
+                ...(String(config?.company || "").trim() ? { company: String(config.company).trim() } : {}),
+              });
+              (context as any).hubspot.contact = contact;
+            } else if (objectType === "company") {
+              const company = await provider.updateCompany(recordId, {
+                ...(String(config?.companyName || "").trim() ? { name: String(config.companyName).trim() } : {}),
+                ...(String(config?.domain || "").trim() ? { domain: String(config.domain).trim() } : {}),
+                ...(String(config?.phone || "").trim() ? { phone: String(config.phone).trim() } : {}),
+              } as any);
+              (context as any).hubspot.company = company;
+            } else if (objectType === "deal") {
+              const amountRaw = String(config?.amount || "").trim();
+              const amount = amountRaw ? Number(amountRaw) : undefined;
+              const deal = await provider.updateDeal(recordId, {
+                ...(String(config?.dealName || "").trim() ? { name: String(config.dealName).trim() } : {}),
+                ...(typeof amount === "number" && !Number.isNaN(amount) ? { amount } : {}),
+                ...(String(config?.stage || "").trim() ? { stage: String(config.stage).trim() } : {}),
+                ...(String(config?.closeDate || "").trim() ? { closeDate: String(config.closeDate).trim() } : {}),
+              } as any);
+              (context as any).hubspot.deal = deal;
+            }
+          } else if (action === "logActivity") {
+            const activityType = String(config?.activityType || "note")
+              .trim()
+              .toLowerCase();
+            const associatedRecordId = String(config?.associatedRecordId || "").trim();
+            const notes = String(config?.activityNotes || "").trim();
+            const duration = config?.callDuration ? Number(config.callDuration) : undefined;
+
+            const activity = await provider.logActivity({
+              type: (activityType as any) || "note",
+              subject: String(config?.activitySubject || "").trim() || undefined,
+              notes: notes || undefined,
+              timestamp: new Date().toISOString(),
+              ...(typeof duration === "number" && !Number.isNaN(duration)
+                ? { duration }
+                : {}),
+              ...(associatedRecordId
+                ? { contactId: associatedRecordId }
+                : {}),
+            } as any);
+
+            (context as any).hubspot.lastActivity = activity;
+            variableResolver.set(
+              "variables.workflow.hubspotLastActivityId",
+              activity?.id,
+              context
+            );
+          }
+
+          // Clear any previous error
+          variableResolver.delete("variables.workflow.hubspotError", context);
+        } catch (error: any) {
+          const msg = String(error?.message || error || "HubSpot error");
+          console.error(`[WorkflowEngine] ${node.label} failed:`, error);
+          variableResolver.set("variables.workflow.hubspotError", msg, context);
+          (context as any).hubspot = (context as any).hubspot || {};
+          (context as any).hubspot.error = msg;
         }
         break;
 

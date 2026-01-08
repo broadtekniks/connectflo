@@ -28,6 +28,7 @@ import Meetings from "./pages/Meetings";
 import Leads from "./pages/Leads";
 import CallLogs from "./pages/CallLogs";
 import Feedback from "./pages/Feedback";
+import IntegrationGuide from "./pages/IntegrationGuide";
 import WebPhoneDialer from "./components/WebPhoneDialer";
 import { api } from "./services/api";
 import { socketService } from "./services/socket";
@@ -48,6 +49,7 @@ const App: React.FC = () => {
     const path = (pathname || "/").toLowerCase();
     if (path === "/" || path === "") return "dashboard";
     if (path.startsWith("/dashboard")) return "dashboard";
+    if (path.startsWith("/integrations/guide")) return "integration-guide";
     if (path.startsWith("/integrations")) return "integrations";
     if (path.startsWith("/workflows")) return "workflows";
     if (path.startsWith("/phone-numbers")) return "phone-numbers";
@@ -213,6 +215,7 @@ const App: React.FC = () => {
     feedback: ["TENANT_ADMIN", "AGENT"],
     "phone-numbers": ["SUPER_ADMIN", "TENANT_ADMIN"],
     workflows: ["TENANT_ADMIN"],
+    "integration-guide": ["TENANT_ADMIN"],
     integrations: ["TENANT_ADMIN"],
     knowledge: ["TENANT_ADMIN"],
     customers: ["TENANT_ADMIN", "AGENT"],
@@ -264,6 +267,8 @@ const App: React.FC = () => {
         return <Tenants />;
       case "integrations":
         return <Integrations />;
+      case "integration-guide":
+        return <IntegrationGuide />;
       case "knowledge":
         return <KnowledgeBase />;
       case "phone-numbers":

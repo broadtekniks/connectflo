@@ -1588,4 +1588,116 @@ export const api = {
       return response.json();
     },
   },
+
+  crmConnections: {
+    list: async (): Promise<
+      Array<{
+        id: string;
+        crmType: string;
+        name: string;
+        status: string;
+        lastSyncAt: string | null;
+        errorMessage: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>
+    > => {
+      const response = await fetch(`${API_URL}/crm-connections`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch CRM connections");
+      return response.json();
+    },
+
+    get: async (id: string) => {
+      const response = await fetch(`${API_URL}/crm-connections/${id}`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch CRM connection");
+      return response.json();
+    },
+
+    create: async (data: {
+      crmType: string;
+      name: string;
+      credentials: any;
+      config?: any;
+    }) => {
+      const response = await fetch(`${API_URL}/crm-connections`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(data),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(
+          error.message || error.error || "Failed to create CRM connection"
+        );
+      }
+      return response.json();
+    },
+
+    updateCredentials: async (id: string, credentials: any) => {
+      const response = await fetch(
+        `${API_URL}/crm-connections/${id}/credentials`,
+        {
+          method: "PUT",
+          headers: authHeader(),
+          body: JSON.stringify({ credentials }),
+        }
+      );
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(
+          error.message || error.error || "Failed to update credentials"
+        );
+      }
+      return response.json();
+    },
+
+    test: async (id: string) => {
+      const response = await fetch(`${API_URL}/crm-connections/${id}/test`, {
+        method: "POST",
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to test connection");
+      return response.json();
+    },
+
+    delete: async (id: string) => {
+      const response = await fetch(`${API_URL}/crm-connections/${id}`, {
+        method: "DELETE",
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to delete CRM connection");
+      return response.json();
+    },
+
+    getFields: async (
+      id: string,
+      objectType?: "contact" | "company" | "deal" | "activity"
+    ) => {
+      const url = objectType
+        ? `${API_URL}/crm-connections/${id}/fields?objectType=${objectType}`
+        : `${API_URL}/crm-connections/${id}/fields`;
+
+      const response = await fetch(url, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error("Failed to fetch discovered fields");
+      return response.json();
+    },
+
+    discoverFields: async (id: string) => {
+      const response = await fetch(
+        `${API_URL}/crm-connections/${id}/discover-fields`,
+        {
+          method: "POST",
+          headers: authHeader(),
+        }
+      );
+      if (!response.ok) throw new Error("Failed to discover fields");
+      return response.json();
+    },
+  },
 };

@@ -6,7 +6,9 @@ import { DateTime } from "luxon";
 import prisma from "../lib/prisma";
 import { buildIcsInvite } from "./calendarInvite";
 import { EmailService } from "./email";
+import { detectIntentFromConfiguredIntents } from "./intents/detectIntent";
 import { GoogleCalendarService } from "./integrations/google/calendar";
+import { CRMService } from "./crm";
 
 const END_CALL_MARKER = "[[END_CALL]]";
 
@@ -15,6 +17,7 @@ const VOICE_CALL_RUNTIME_INSTRUCTIONS = [
   "Keep responses concise and conversational.",
   "If the caller asks to end the call, respond with a brief goodbye and confirm you are ending the call.",
   `If you decide the call should be ended now, include the token ${END_CALL_MARKER} in your TEXT output only (do not say the token out loud).`,
+  "If the caller says they are done (e.g. 'that's all', 'bye', 'goodbye', 'thank you'), you should thank them, say a short goodbye, and end the call.",
 ].join("\n");
 
 function normalizeGreeting(raw: string, agentName?: string): string {
@@ -353,41 +356,263 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
   private checkWithinWorkingHours(
     start: DateTime,
     end: DateTime,
-    workingHours: Record<string, { start: string; end: string } | null>,
+    workingHours: any,
     workingHoursTimeZone: string
   ): boolean {
+    if (!workingHours || typeof workingHours !== "object") return false;
+
     // Convert start/end to the working hours timezone
-    const startInZone = start.setZone(workingHoursTimeZone);
-    const endInZone = end.setZone(workingHoursTimeZone);
+    let startInZone = start.setZone(workingHoursTimeZone);
+    let endInZone = end.setZone(workingHoursTimeZone);
 
-    // Get day of week (lowercase: monday, tuesday, etc.)
-    const dayOfWeek = startInZone.weekdayLong?.toLowerCase();
-    if (!dayOfWeek) return false;
+    // Support both formats:
+    // 1) { days: { mon:{enabled,start,end}, ... } }  (current)
+    // 2) { monday:{start,end}, ... }                (legacy)
+    // 3) { mon:{start,end}, ... }                   (legacy)
+    const hasDaysObject = (raw: any): raw is { days: Record<string, any> } =>
+      Boolean(
+        raw &&
+          typeof raw === "object" &&
+          raw.days &&
+          typeof raw.days === "object"
+      );
 
-    // Get working hours for this day
-    const dayHours = workingHours[dayOfWeek];
-    if (!dayHours || !dayHours.start || !dayHours.end) {
-      // Day is not configured or marked as closed
-      return false;
+    const weekdayShort = startInZone.toFormat("ccc").toLowerCase(); // mon/tue/...
+    const weekdayLong = (startInZone.weekdayLong || "").toLowerCase(); // monday/...
+
+    let dayConfig: any;
+    if (hasDaysObject(workingHours)) {
+      dayConfig = workingHours.days?.[weekdayShort];
+      if (!dayConfig?.enabled) return false;
+    } else {
+      dayConfig =
+        workingHours?.[weekdayLong] ??
+        workingHours?.[weekdayShort] ??
+        workingHours?.[weekdayShort.slice(0, 3)];
     }
 
-    // Parse working hours times (format: "HH:mm")
-    const [startHour, startMin] = dayHours.start.split(":").map(Number);
-    const [endHour, endMin] = dayHours.end.split(":").map(Number);
+    const dayStart = String(dayConfig?.start || "").trim();
+    const dayEnd = String(dayConfig?.end || "").trim();
+    if (!dayStart || !dayEnd) return false;
+
+    const [startHour, startMin] = dayStart.split(":").map(Number);
+    const [endHour, endMin] = dayEnd.split(":").map(Number);
+    if (
+      Number.isNaN(startHour) ||
+      Number.isNaN(startMin) ||
+      Number.isNaN(endHour) ||
+      Number.isNaN(endMin)
+    ) {
+      return false;
+    }
 
     const workStart = startInZone.set({
       hour: startHour,
       minute: startMin,
       second: 0,
     });
-    const workEnd = startInZone.set({
-      hour: endHour,
-      minute: endMin,
+    let workEnd = startInZone.set({ hour: endHour, minute: endMin, second: 0 });
+
+    // Handle overnight shifts (e.g., 22:00 -> 06:00)
+    if (workEnd <= workStart) {
+      workEnd = workEnd.plus({ days: 1 });
+      if (endInZone <= startInZone) {
+        endInZone = endInZone.plus({ days: 1 });
+      }
+    }
+
+    return startInZone >= workStart && endInZone <= workEnd;
+  }
+
+  /**
+   * Check calendar availability for a specific date and suggest available time slots
+   */
+  private async checkCalendarAvailability(
+    session: TwilioRealtimeSession,
+    input: {
+      date: string;
+      durationMinutes?: number;
+    }
+  ): Promise<{
+    success: boolean;
+    message: string;
+    date?: string;
+    timeZone?: string;
+    availableSlots?: Array<{ startTime: string; endTime: string }>;
+  }> {
+    // Determine requested timezone (used as a hint). Do not ask callers for this; prefer workflow/tenant settings.
+    const assignedAgent = session.workflowContext?.workflow?.assignedAgent;
+    const workflow = session.workflowContext?.workflow;
+    const requestedTimeZone =
+      String((workflow?.businessTimeZone || "").trim()) ||
+      String((session.workflowContext?.tenant?.timeZone || "").trim()) ||
+      assignedAgent?.agentTimeZone ||
+      this.getDefaultTimeZone(session);
+
+    const durationMinutes = input.durationMinutes || 30;
+
+    // Parse the date
+    const dateStr = String(input.date || "").trim();
+    if (!dateStr) {
+      return {
+        success: false,
+        message: "Missing date parameter",
+      };
+    }
+
+    const tenantPrefs: any = await (prisma as any).tenant.findUnique({
+      where: { id: session.tenantId },
+      select: {
+        businessHours: true,
+        businessTimeZone: true,
+      },
+    });
+
+    const hasDaysObject = (raw: any): boolean => {
+      if (!raw || typeof raw !== "object") return false;
+      const days = (raw as any).days;
+      return Boolean(days && typeof days === "object");
+    };
+
+    const workingHours = hasDaysObject(workflow?.businessHours)
+      ? workflow?.businessHours
+      : assignedAgent?.workingHours || tenantPrefs?.businessHours;
+
+    const scheduleTimeZone =
+      String((workflow?.businessTimeZone || "").trim()) ||
+      assignedAgent?.timezone ||
+      tenantPrefs?.businessTimeZone ||
+      requestedTimeZone;
+
+    const parsed = DateTime.fromISO(dateStr, { zone: scheduleTimeZone });
+    if (!parsed.isValid) {
+      return {
+        success: false,
+        message: "Invalid date format (expected YYYY-MM-DD)",
+      };
+    }
+
+    if (!workingHours || typeof workingHours !== "object") {
+      return {
+        success: false,
+        message: "Working hours not configured",
+      };
+    }
+
+    // Get the day of week
+    const dayOfWeek = parsed.toFormat("EEE").toLowerCase(); // 'mon', 'tue', etc.
+    const days = (workingHours as any).days;
+    const dayConfig = days?.[dayOfWeek];
+
+    if (!dayConfig?.enabled) {
+      return {
+        success: false,
+        message: `We are closed on ${parsed.toFormat(
+          "EEEE"
+        )}. Please choose a different date.`,
+        date: dateStr,
+        timeZone: scheduleTimeZone,
+      };
+    }
+
+    // Parse working hours for this day
+    const startParts = String(dayConfig.start || "09:00")
+      .split(":")
+      .map(Number);
+    const endParts = String(dayConfig.end || "17:00")
+      .split(":")
+      .map(Number);
+    const workStartHour = startParts[0] ?? 9;
+    const workStartMin = startParts[1] ?? 0;
+    const workEndHour = endParts[0] ?? 17;
+    const workEndMin = endParts[1] ?? 0;
+
+    // Generate time slots from working hours start to end
+    const availableSlots: Array<{ startTime: string; endTime: string }> = [];
+    let cursor = parsed.set({
+      hour: workStartHour,
+      minute: workStartMin,
+      second: 0,
+    });
+    const workEnd = parsed.set({
+      hour: workEndHour,
+      minute: workEndMin,
       second: 0,
     });
 
-    // Check if appointment is within working hours
-    return startInZone >= workStart && endInZone <= workEnd;
+    // Check every 30-minute slot across the full working window
+    const maxSlotsToCheck = 96;
+    let slotsChecked = 0;
+
+    while (cursor < workEnd && slotsChecked < maxSlotsToCheck) {
+      const slotEnd = cursor.plus({ minutes: durationMinutes });
+
+      // Make sure the slot doesn't extend past working hours
+      if (slotEnd <= workEnd) {
+        const startTime = cursor.toISO();
+        const endTime = slotEnd.toISO();
+
+        if (startTime && endTime) {
+          try {
+            // Check calendar availability
+            const availability = await this.googleCalendar.checkAvailability(
+              session.tenantId,
+              startTime,
+              endTime,
+              scheduleTimeZone
+            );
+
+            if (availability?.isFree) {
+              availableSlots.push({ startTime, endTime });
+            }
+          } catch (error) {
+            console.error(
+              `[TwilioRealtime] Failed to check availability for ${startTime}:`,
+              error
+            );
+          }
+        }
+      }
+
+      cursor = cursor.plus({ minutes: 30 });
+      slotsChecked++;
+    }
+
+    // If we found a lot of slots, return a spread across the day (not just morning).
+    const maxReturn = 12;
+    let returnedSlots = availableSlots;
+    if (availableSlots.length > maxReturn) {
+      const pick: Array<{ startTime: string; endTime: string }> = [];
+      const first = availableSlots.slice(0, 4);
+      const last = availableSlots.slice(-4);
+      const midStart = Math.max(0, Math.floor(availableSlots.length / 2) - 2);
+      const middle = availableSlots.slice(midStart, midStart + 4);
+      for (const s of [...first, ...middle, ...last]) {
+        if (!pick.find((p) => p.startTime === s.startTime)) pick.push(s);
+      }
+      returnedSlots = pick.slice(0, maxReturn);
+    }
+
+    if (availableSlots.length === 0) {
+      return {
+        success: false,
+        message: `No available time slots found for ${parsed.toFormat(
+          "MMMM d, yyyy"
+        )}. Please try a different date.`,
+        date: dateStr,
+        timeZone: scheduleTimeZone,
+      };
+    }
+
+    return {
+      success: true,
+      message: `Found ${
+        returnedSlots.length
+      } available time slots for ${parsed.toFormat("MMMM d, yyyy")}`,
+      date: dateStr,
+      timeZone: scheduleTimeZone,
+      availableSlots: returnedSlots,
+    };
   }
 
   private async bookAppointment(
@@ -417,12 +642,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     calendarIsFree?: boolean;
     suggestions?: Array<{ startTime: string; endTime: string }>;
   }> {
-    // Determine timezone: use agent timezone if assigned, otherwise use input or default
+    // Determine timezone: prefer workflow/tenant settings; do not require callers to state a timezone.
     const assignedAgent = session.workflowContext?.workflow?.assignedAgent;
-    const timeZone =
-      assignedAgent?.agentTimeZone ||
-      String(input.timeZone || "").trim() ||
-      this.getDefaultTimeZone(session);
+    const workflow = session.workflowContext?.workflow;
 
     const tenantPrefs: any = await (prisma as any).tenant.findUnique({
       where: { id: session.tenantId },
@@ -433,6 +655,13 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         businessTimeZone: true,
       },
     });
+
+    const timeZone =
+      String((workflow?.businessTimeZone || "").trim()) ||
+      String((tenantPrefs?.businessTimeZone || "").trim()) ||
+      assignedAgent?.agentTimeZone ||
+      String(input.timeZone || "").trim() ||
+      this.getDefaultTimeZone(session);
 
     const maxDurationMinutes = Math.min(
       8 * 60,
@@ -524,11 +753,31 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       };
     }
 
-    // Validate against working hours (agent's if assigned, otherwise tenant's business hours)
-    const workingHours =
-      assignedAgent?.workingHours || tenantPrefs?.businessHours;
+    // Validate against working hours - check workflow override first, then agent, then tenant
+    const hasDaysObject = (raw: any): boolean => {
+      if (!raw || typeof raw !== "object") return false;
+      const days = (raw as any).days;
+      return Boolean(days && typeof days === "object");
+    };
+
+    const workingHours = hasDaysObject(workflow?.businessHours)
+      ? workflow?.businessHours
+      : assignedAgent?.workingHours || tenantPrefs?.businessHours;
+
     const workingHoursTimeZone =
-      assignedAgent?.timezone || tenantPrefs?.businessTimeZone || timeZone;
+      String((workflow?.businessTimeZone || "").trim()) ||
+      assignedAgent?.timezone ||
+      tenantPrefs?.businessTimeZone ||
+      timeZone;
+
+    console.log("[TwilioRealtime] Working hours check:", {
+      hasWorkflowBusinessHours: hasDaysObject(workflow?.businessHours),
+      workflowBusinessTimeZone: workflow?.businessTimeZone,
+      workingHoursTimeZone,
+      startTime,
+      endTime,
+      workingHours: JSON.stringify(workingHours),
+    });
 
     if (workingHours && typeof workingHours === "object") {
       const isWithinWorkingHours = this.checkWithinWorkingHours(
@@ -536,6 +785,11 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         end,
         workingHours as any,
         workingHoursTimeZone
+      );
+
+      console.log(
+        "[TwilioRealtime] isWithinWorkingHours:",
+        isWithinWorkingHours
       );
 
       if (!isWithinWorkingHours) {
@@ -723,6 +977,15 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       calendarMeetLink: googleEvent?.meetLink,
     };
 
+    // Best-effort: execute any HubSpot Search/Create workflow nodes after a successful booking.
+    // This keeps HubSpot in sync with calls that booked an appointment.
+    void this.runHubSpotWorkflowNodes(session).catch((err) => {
+      console.error(
+        "[TwilioRealtime] HubSpot workflow node execution failed:",
+        err
+      );
+    });
+
     // Log appointment to database
     if (this.loggingService && session.tenantId) {
       try {
@@ -766,6 +1029,327 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       calendarIsFree,
       suggestions: suggestions.length ? suggestions : undefined,
     };
+  }
+
+  private buildWorkflowResolverContext(session: TwilioRealtimeSession): any {
+    const rawName = String(
+      session.workflowContext?.customer?.name || ""
+    ).trim();
+    const nameParts = rawName ? rawName.split(/\s+/).filter(Boolean) : [];
+    const firstName =
+      String(session.workflowContext?.customer?.firstName || "").trim() ||
+      (nameParts.length ? nameParts[0] : "");
+    const lastName =
+      String(session.workflowContext?.customer?.lastName || "").trim() ||
+      (nameParts.length > 1 ? nameParts.slice(1).join(" ") : "");
+
+    return {
+      customer: {
+        ...(session.workflowContext?.customer || {}),
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
+      },
+      call: session.workflowContext?.call || {},
+      tenant: session.workflowContext?.tenant || {},
+      workflow: session.workflowContext?.workflow || {},
+      variables: {
+        workflow: {
+          booking: session.workflowContext?.booking || {},
+        },
+        conversation: {},
+        global: {},
+      },
+    };
+  }
+
+  private linearizeWorkflow(nodes: any[], edges: any[]): any[] {
+    const byId = new Map<string, any>();
+    for (const n of nodes) {
+      if (n && typeof n.id === "string") byId.set(n.id, n);
+    }
+
+    const start =
+      nodes.find(
+        (n: any) => n?.type === "trigger" && n?.label === "Incoming Call"
+      ) || nodes.find((n: any) => n?.type === "trigger");
+    if (!start?.id) return [];
+
+    const out: any[] = [];
+    const visited = new Set<string>();
+    let current: any = start;
+    let steps = 0;
+
+    while (current?.id && !visited.has(current.id) && steps < 50) {
+      visited.add(current.id);
+      out.push(current);
+
+      const outgoing = edges.filter((e: any) => e?.source === current.id);
+      if (!outgoing.length) break;
+
+      // If this is the appointment gate, prefer the "yes" path.
+      let nextEdge: any = outgoing[0];
+      const label = String(current?.label || "").toLowerCase();
+      if (label.includes("request") && label.includes("appointment")) {
+        const yes = outgoing.find(
+          (e: any) => String(e?.label || "").toLowerCase() === "yes"
+        );
+        if (yes) nextEdge = yes;
+      }
+
+      const nextNode = nextEdge?.target
+        ? byId.get(String(nextEdge.target))
+        : undefined;
+      if (!nextNode) break;
+      current = nextNode;
+      steps += 1;
+    }
+
+    return out;
+  }
+
+  private async runHubSpotWorkflowNodes(
+    session: TwilioRealtimeSession
+  ): Promise<void> {
+    const workflowId = String(
+      session.workflowContext?.workflow?.id || ""
+    ).trim();
+    if (!workflowId) return;
+
+    const workflow: any = await (prisma as any).workflow.findUnique({
+      where: { id: workflowId },
+      select: { id: true, tenantId: true, nodes: true, edges: true },
+    });
+    if (!workflow) return;
+
+    const nodes: any[] = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+    const edges: any[] = Array.isArray(workflow.edges) ? workflow.edges : [];
+    const ordered = this.linearizeWorkflow(nodes, edges);
+    const hubspotNodes = ordered.filter((n: any) =>
+      String(n?.label || "").startsWith("HubSpot")
+    );
+    if (!hubspotNodes.length) return;
+
+    console.log("[TwilioRealtime] HubSpot workflow sync starting", {
+      workflowId,
+      hubspotNodeCount: hubspotNodes.length,
+    });
+
+    const connection = await (prisma as any).crmConnection.findFirst({
+      where: {
+        tenantId: session.tenantId,
+        crmType: "hubspot",
+        status: "active",
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+
+    if (!connection?.id) {
+      console.warn(
+        "[TwilioRealtime] HubSpot workflow nodes skipped: no active HubSpot connection"
+      );
+      return;
+    }
+
+    const provider = await CRMService.getProvider(connection.id);
+    const resolverContext = this.buildWorkflowResolverContext(session);
+
+    const clean = (v: any): string => {
+      const s = String(v ?? "").trim();
+      return s.includes("{{") ? "" : s;
+    };
+
+    for (const node of hubspotNodes) {
+      const nodeId = String(node?.id || "").trim() || undefined;
+      const resolvedConfig = variableResolver.resolveObject(
+        node?.config || {},
+        resolverContext
+      );
+      const action =
+        String(resolvedConfig?.action || "").trim() ||
+        String(node?.label || "");
+      const objectType = String(resolvedConfig?.objectType || "contact")
+        .trim()
+        .toLowerCase();
+
+      console.log("[TwilioRealtime] HubSpot node start", {
+        workflowId,
+        nodeId,
+        label: node?.label,
+        action,
+        objectType,
+      });
+
+      // Persist last results into session.workflowContext.hubspot so other steps can reference them later.
+      session.workflowContext = session.workflowContext || {};
+      session.workflowContext.hubspot = session.workflowContext.hubspot || {};
+
+      try {
+        if (String(action).toLowerCase().includes("search")) {
+          if (objectType === "contact") {
+            const email = clean(
+              resolvedConfig?.email || resolverContext?.customer?.email
+            );
+            const phone = clean(
+              resolvedConfig?.phone || resolverContext?.customer?.phone
+            );
+            const name = clean(
+              [resolvedConfig?.firstName, resolvedConfig?.lastName]
+                .map((x: any) => clean(x))
+                .filter(Boolean)
+                .join(" ") || resolverContext?.customer?.name
+            );
+
+            console.log("[TwilioRealtime] HubSpot contact search criteria", {
+              workflowId,
+              nodeId,
+              hasEmail: Boolean(email),
+              hasPhone: Boolean(phone),
+              hasName: Boolean(name),
+            });
+
+            const results = await provider.searchContacts({
+              ...(email ? { email } : {}),
+              ...(phone ? { phone } : {}),
+              ...(!email && !phone && name ? { name } : {}),
+            });
+            session.workflowContext.hubspot.contactSearchResults = results;
+            session.workflowContext.hubspot.contact = results?.[0] || null;
+
+            const first = results?.[0];
+            console.log("[TwilioRealtime] HubSpot contact search done", {
+              workflowId,
+              nodeId,
+              count: Array.isArray(results) ? results.length : 0,
+              firstId: first?.id || first?.hs_object_id || undefined,
+            });
+          }
+
+          if (objectType === "company") {
+            const name = clean(
+              resolvedConfig?.companyName || resolvedConfig?.company
+            );
+            const domain = clean(resolvedConfig?.domain);
+
+            console.log("[TwilioRealtime] HubSpot company search criteria", {
+              workflowId,
+              nodeId,
+              hasName: Boolean(name),
+              hasDomain: Boolean(domain),
+            });
+
+            const results = await provider.searchCompanies({
+              ...(name ? { name } : {}),
+              ...(domain ? { domain } : {}),
+            });
+            session.workflowContext.hubspot.companySearchResults = results;
+            session.workflowContext.hubspot.company = results?.[0] || null;
+
+            const first = results?.[0];
+            console.log("[TwilioRealtime] HubSpot company search done", {
+              workflowId,
+              nodeId,
+              count: Array.isArray(results) ? results.length : 0,
+              firstId: first?.id || first?.hs_object_id || undefined,
+            });
+          }
+        }
+
+        if (String(action).toLowerCase().includes("create")) {
+          if (objectType === "contact") {
+            const email = clean(
+              resolvedConfig?.email || resolverContext?.customer?.email
+            );
+            const firstName = clean(
+              resolvedConfig?.firstName || resolverContext?.customer?.firstName
+            );
+            const lastName = clean(
+              resolvedConfig?.lastName || resolverContext?.customer?.lastName
+            );
+            const phone = clean(
+              resolvedConfig?.phone || resolverContext?.customer?.phone
+            );
+            const company = clean(resolvedConfig?.company);
+
+            console.log("[TwilioRealtime] HubSpot contact create fields", {
+              workflowId,
+              nodeId,
+              hasEmail: Boolean(email),
+              hasFirstName: Boolean(firstName),
+              hasLastName: Boolean(lastName),
+              hasPhone: Boolean(phone),
+              hasCompany: Boolean(company),
+            });
+
+            const created = await provider.createContact({
+              ...(email ? { email } : {}),
+              ...(firstName ? { firstName } : {}),
+              ...(lastName ? { lastName } : {}),
+              ...(phone ? { phone } : {}),
+              ...(company ? { company } : {}),
+            });
+            session.workflowContext.hubspot.contact = created;
+
+            console.log("[TwilioRealtime] HubSpot contact create done", {
+              workflowId,
+              nodeId,
+              createdId: created?.id || created?.hs_object_id || undefined,
+            });
+          }
+
+          if (objectType === "company") {
+            const companyName = clean(
+              resolvedConfig?.companyName ||
+                resolvedConfig?.company ||
+                "New Company"
+            );
+            const domain = clean(resolvedConfig?.domain);
+            const phone = clean(resolvedConfig?.phone);
+
+            console.log("[TwilioRealtime] HubSpot company create fields", {
+              workflowId,
+              nodeId,
+              hasName: Boolean(companyName),
+              hasDomain: Boolean(domain),
+              hasPhone: Boolean(phone),
+            });
+
+            const created = await provider.createCompany({
+              name: companyName,
+              ...(domain ? { domain } : {}),
+              ...(phone ? { phone } : {}),
+            } as any);
+            session.workflowContext.hubspot.company = created;
+
+            console.log("[TwilioRealtime] HubSpot company create done", {
+              workflowId,
+              nodeId,
+              createdId: created?.id || created?.hs_object_id || undefined,
+            });
+          }
+        }
+
+        console.log("[TwilioRealtime] HubSpot node done", {
+          workflowId,
+          nodeId,
+          action,
+          objectType,
+        });
+      } catch (err: any) {
+        console.error("[TwilioRealtime] HubSpot node error", {
+          workflowId,
+          nodeId,
+          label: node?.label,
+          action,
+          objectType,
+          message: err?.message || String(err),
+        });
+      }
+    }
+
+    console.log("[TwilioRealtime] HubSpot workflow sync finished", {
+      workflowId,
+      hubspotNodeCount: hubspotNodes.length,
+    });
   }
 
   private extractTextFromResponseDone(message: any): string {
@@ -944,7 +1528,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.\n\nIDENTITY CHECK RULES:\n- If our records show a caller name, ask: "Are you <name>?" and wait for yes/no.\n- If the caller confirms, call update_customer_info with that same name to mark it verified.\n- If we do NOT have a name on file, always ask for their full name and save it.\n\nAPPOINTMENT BOOKING RULES:\n- Before calling book_appointment, ALWAYS confirm: date, time, time zone, and email address.\n- ALWAYS read back the email address slowly and ask the caller to confirm yes/no.\n- If the caller spells their email using patterns like "S for Sugar" or phonetics like "Tango", use normalize_email_spelling to reconstruct the email; then read it back and confirm.\n- Only call book_appointment AFTER email confirmation. Include emailConfirmed=true.\n- By default, require a Google Calendar event (requireCalendarEvent=true). If Google Calendar isn't available, ask if email-only is acceptable and only then set requireCalendarEvent=false.\n- If the caller says "tomorrow at 10", ask clarifying questions if date/time zone are ambiguous.\n- Booking must respect the connected Google Calendar schedule; if busy, offer alternatives.\n\nIf the caller asks to book/schedule an appointment or call, follow the rules above and then use the book_appointment function to create the appointment and send a confirmation email (with an .ics invite).`,
+            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.\n\nIDENTITY CHECK RULES:\n- If our records show a caller name, ask: "Are you <name>?" and wait for yes/no.\n- If the caller confirms, call update_customer_info with that same name to mark it verified.\n- If we do NOT have a name on file, always ask for their full name and save it.\n\nAPPOINTMENT BOOKING RULES:\n- Before calling book_appointment, ALWAYS confirm: date, time, and email address.\n- Do NOT ask the caller for their time zone. Use the workflow/tenant business time zone. Only capture a time zone if the caller explicitly provides one.\n- ALWAYS read back the email address slowly and ask the caller to confirm yes/no.\n- If the caller spells their email using patterns like "S for Sugar" or phonetics like "Tango", use normalize_email_spelling to reconstruct the email; then read it back and confirm.\n- Only call book_appointment AFTER email confirmation. Include emailConfirmed=true.\n- By default, require a Google Calendar event (requireCalendarEvent=true). If Google Calendar isn't available, ask if email-only is acceptable and only then set requireCalendarEvent=false.\n- If the caller says "tomorrow at 10", ask clarifying questions if date/time zone are ambiguous (do not ask for a time zone unless they brought it up).\n- Booking must respect the connected Google Calendar schedule; if busy, offer alternatives.\n\nIf the caller asks to book/schedule an appointment or call, follow the rules above and then use the book_appointment function to create the appointment and send a confirmation email (with an .ics invite).`,
             voice: voice, // Options: alloy, echo, shimmer
             input_audio_format: "g711_ulaw", // Twilio uses mulaw
             output_audio_format: "g711_ulaw",
@@ -1027,7 +1611,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                     timeZone: {
                       type: "string",
                       description:
-                        "IANA timezone name (e.g. America/Los_Angeles). If omitted, a tenant default is used.",
+                        "Optional IANA timezone name (e.g. America/Los_Angeles) ONLY if the caller explicitly states it. If omitted, workflow/tenant business time zone is used.",
                     },
                     durationMinutes: {
                       type: "number",
@@ -1064,6 +1648,28 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                     },
                   },
                   required: ["startTime"],
+                },
+              },
+              {
+                type: "function",
+                name: "check_calendar_availability",
+                description:
+                  "Check if specific time slots are available on the connected calendar. Use this to suggest available times to the caller.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    date: {
+                      type: "string",
+                      description:
+                        "Date to check availability for (YYYY-MM-DD format)",
+                    },
+                    durationMinutes: {
+                      type: "number",
+                      description:
+                        "Desired appointment length in minutes (defaults to 30)",
+                    },
+                  },
+                  required: ["date"],
                 },
               },
             ],
@@ -1137,6 +1743,21 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         if (transcript) {
           console.log(`[TwilioRealtime] User transcript: ${transcript}`);
 
+          // Update detected intent (keyword matching against tenant-configured intents).
+          try {
+            const rawIntents = session.workflowContext?.ai?.intents;
+            const detectedIntent = detectIntentFromConfiguredIntents(
+              transcript,
+              rawIntents
+            );
+            session.workflowContext = session.workflowContext || {};
+            session.workflowContext.conversation =
+              session.workflowContext.conversation || {};
+            session.workflowContext.conversation.intent = detectedIntent;
+          } catch (e) {
+            // Best-effort: do not interrupt call flow.
+          }
+
           // Auto-handle identity/email confirmations when we have a pending candidate.
           if (session.workflowContext?.pendingIdentityName) {
             if (transcriptIsAffirmative(transcript)) {
@@ -1183,7 +1804,23 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
 
           if (this.userWantsToEndCall(transcript)) {
             session.pendingHangupReason = "caller_requested";
-            session.hangupAfterThisResponse = false;
+            session.hangupAfterThisResponse = true;
+
+            // Ask the assistant to say a brief goodbye; then we will hang up
+            // after the response finishes (see response.done handler).
+            if (session.openaiWs && !session.responseInProgress) {
+              session.responseRequested = true;
+              session.openaiWs.send(
+                JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions:
+                      "The caller wants to end the call. Thank them, say a brief goodbye, and confirm you are ending the call now.",
+                  },
+                })
+              );
+            }
           }
         }
       }
@@ -1522,6 +2159,36 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               })
             );
           }
+        }
+      }
+
+      if (functionName === "check_calendar_availability") {
+        const result = await this.checkCalendarAvailability(session, {
+          date: args.date,
+          durationMinutes: args.durationMinutes,
+        });
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify(result),
+              },
+            })
+          );
+
+          session.responseRequested = true;
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+              },
+            })
+          );
         }
       }
 

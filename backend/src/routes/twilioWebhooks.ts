@@ -6,6 +6,7 @@ import { twilioRealtimeVoiceService } from "../services/twilioRealtimeVoice";
 import { hybridVoiceService } from "../services/hybridVoice";
 import { applyToneOfVoiceToSystemPrompt } from "../services/ai/toneOfVoice";
 import { isTenantOpenNow } from "../services/businessHours";
+import { detectIntentFromConfiguredIntents } from "../services/intents/detectIntent";
 import { UsageService } from "../services/usage";
 import {
   isNowWithinWorkingHours,
@@ -641,7 +642,16 @@ router.post("/voice", async (req: Request, res: Response) => {
         isActive: true,
         triggerType: "Incoming Call",
       },
-      include: {
+      select: {
+        id: true,
+        name: true,
+        nodes: true,
+        edges: true,
+        businessTimeZone: true,
+        businessHours: true,
+        afterHoursMode: true,
+        afterHoursMessage: true,
+        afterHoursWorkflowId: true,
         aiConfig: true,
         documents: {
           include: {
@@ -720,9 +730,9 @@ router.post("/voice", async (req: Request, res: Response) => {
     // - If a workflow exists but DOES NOT override business hours/timezone, use the org (tenant) hours and fallback.
     //   This prevents the workflow from unexpectedly running after-hours unless explicitly configured.
     // - If a workflow exists with after-hours configuration, handle based on afterHoursMode.
-    
+
     let selectedWorkflow = normalWorkflow;
-    
+
     if (!isOpenNow && (!normalWorkflow || !workflowHasHoursOverride)) {
       const callbackUrl =
         deriveVoicemailCallbackUrl() ||
@@ -756,20 +766,28 @@ router.post("/voice", async (req: Request, res: Response) => {
       res.send(twiml);
       return;
     }
-    
+
     // Handle workflow-level after-hours configuration
     if (!isOpenNow && normalWorkflow && workflowHasHoursOverride) {
-      const afterHoursMode = String((normalWorkflow as any)?.afterHoursMode || "USE_ORG");
-      
-      console.log(`[Twilio] After-hours detected for workflow ${(normalWorkflow as any).id}, mode: ${afterHoursMode}`);
-      
+      const afterHoursMode = String(
+        (normalWorkflow as any)?.afterHoursMode || "USE_ORG"
+      );
+
+      console.log(
+        `[Twilio] After-hours detected for workflow ${
+          (normalWorkflow as any).id
+        }, mode: ${afterHoursMode}`
+      );
+
       if (afterHoursMode === "CUSTOM_VOICEMAIL") {
         const callbackUrl =
           deriveVoicemailCallbackUrl() ||
           `${req.protocol}://${req.get("host")}${req.baseUrl}/voicemail`;
         const maxLength = 120;
         const sayText =
-          normalizeTwilioSayText((normalWorkflow as any)?.afterHoursMessage || "") ||
+          normalizeTwilioSayText(
+            (normalWorkflow as any)?.afterHoursMessage || ""
+          ) ||
           normalizeTwilioSayText(phoneNumber.afterHoursMessage || "") ||
           "Thanks for calling. We're currently closed. Please leave a message after the beep.";
 
@@ -793,11 +811,15 @@ router.post("/voice", async (req: Request, res: Response) => {
         res.send(twiml);
         return;
       } else if (afterHoursMode === "REDIRECT_WORKFLOW") {
-        const targetWorkflowId = String((normalWorkflow as any)?.afterHoursWorkflowId || "");
-        
+        const targetWorkflowId = String(
+          (normalWorkflow as any)?.afterHoursWorkflowId || ""
+        );
+
         if (targetWorkflowId) {
-          console.log(`[Twilio] Redirecting to after-hours workflow: ${targetWorkflowId}`);
-          
+          console.log(
+            `[Twilio] Redirecting to after-hours workflow: ${targetWorkflowId}`
+          );
+
           // Load the target workflow
           const targetWorkflow = await prisma.workflow.findFirst({
             where: {
@@ -822,12 +844,16 @@ router.post("/voice", async (req: Request, res: Response) => {
               },
             } as any,
           });
-          
+
           if (targetWorkflow) {
-            console.log(`[Twilio] Successfully loaded after-hours target workflow: ${targetWorkflow.name}`);
+            console.log(
+              `[Twilio] Successfully loaded after-hours target workflow: ${targetWorkflow.name}`
+            );
             selectedWorkflow = targetWorkflow;
           } else {
-            console.log(`[Twilio] After-hours target workflow not found, using original workflow`);
+            console.log(
+              `[Twilio] After-hours target workflow not found, using original workflow`
+            );
           }
         }
       }
@@ -904,6 +930,12 @@ router.post("/voice", async (req: Request, res: Response) => {
         `[Twilio] No matching active Incoming Call workflow found for tenant ${phoneNumber.tenantId} (To=${To}). Using defaults.`
       );
     }
+
+    // Resolve an initial intent for the call (updates later as transcripts arrive).
+    const initialIntent = detectIntentFromConfiguredIntents(
+      "",
+      (selectedWorkflow as any)?.aiConfig?.intents
+    );
 
     // Return TwiML to start Media Stream.
     // NOTE: We avoid Twilio <Say> for the greeting to reduce robotic-sounding TTS.
@@ -1004,9 +1036,10 @@ router.post("/voice", async (req: Request, res: Response) => {
             id: existingConversation.id,
             channel: existingConversation.channel,
             status: existingConversation.status,
+            intent: initialIntent,
             metadata: {},
           }
-        : undefined,
+        : { intent: initialIntent, metadata: {} },
       call: {
         sid: CallSid,
         from: From,
@@ -1024,6 +1057,8 @@ router.post("/voice", async (req: Request, res: Response) => {
       workflow: {
         id: workflowId,
         name: (selectedWorkflow as any)?.name,
+        businessTimeZone: (selectedWorkflow as any)?.businessTimeZone,
+        businessHours: (selectedWorkflow as any)?.businessHours,
         assignedAgent: (selectedWorkflow as any)?.assignedAgent
           ? {
               id: (selectedWorkflow as any).assignedAgent.id,
@@ -1034,6 +1069,9 @@ router.post("/voice", async (req: Request, res: Response) => {
                 .workingHours,
             }
           : undefined,
+      },
+      ai: {
+        intents: (selectedWorkflow as any)?.aiConfig?.intents,
       },
     };
 
@@ -1134,7 +1172,7 @@ router.post("/voice", async (req: Request, res: Response) => {
             });
 
             res.type("text/xml");
-            
+
             // If there's a greeting, play it before forwarding
             let twiml: string;
             if (greeting && greeting.trim()) {
@@ -1148,7 +1186,9 @@ router.post("/voice", async (req: Request, res: Response) => {
     clients,
     timeoutSeconds,
     actionUrl,
-  }).replace(/<\?xml[^>]*>/, '').replace(/<\/?Response>/g, '')}
+  })
+    .replace(/<\?xml[^>]*>/, "")
+    .replace(/<\/?Response>/g, "")}
 </Response>`;
               console.log(
                 `[Twilio] Sending greeting + dial TwiML for ${firstLabel}:`,

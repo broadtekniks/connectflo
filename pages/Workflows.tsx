@@ -314,6 +314,12 @@ const COMPONENT_LIBRARY = [
         subLabel: "Hang up call",
       },
       {
+        label: "Say/Play",
+        icon: Phone,
+        type: "action",
+        subLabel: "TTS or hold music",
+      },
+      {
         label: "Call Group",
         icon: Users,
         type: "action",
@@ -371,12 +377,14 @@ const COMPONENT_LIBRARY = [
         iconUrl: "https://cdn.simpleicons.org/salesforce",
         type: "integration",
         subLabel: "Find customer",
+        provider: "salesforce",
       },
       {
-        label: "HubSpot Create",
+        label: "HubSpot",
         iconUrl: "https://cdn.simpleicons.org/hubspot",
         type: "integration",
-        subLabel: "New lead",
+        subLabel: "CRM operations",
+        provider: "hubspot",
       },
       {
         label: "Jira Issue",
@@ -1075,6 +1083,13 @@ const Workflows: React.FC = () => {
   const [connectedIntegrations, setConnectedIntegrations] = useState<
     Array<{ provider: string; type: string; name: string }>
   >([]);
+  const [filterLabel, setFilterLabel] = useState<string>("");
+  const [showLabelModal, setShowLabelModal] = useState(false);
+  const [editingLabels, setEditingLabels] = useState<string[]>([]);
+  const [newLabel, setNewLabel] = useState("");
+  const [editingWorkflowId, setEditingWorkflowId] = useState<string | null>(
+    null
+  );
 
   useEffect(() => {
     loadWorkflows();
@@ -1121,6 +1136,24 @@ const Workflows: React.FC = () => {
       const connectedOnly = Array.isArray(response.integrations)
         ? response.integrations.filter((i: any) => i?.connected === true)
         : [];
+
+      // Also fetch CRM connections
+      try {
+        const crmConnections = await api.crmConnections.list();
+        console.log("[Workflows] Fetched CRM connections:", crmConnections);
+
+        // Add CRM connections to the list (they all count as connected)
+        crmConnections.forEach((conn: any) => {
+          connectedOnly.push({
+            provider: conn.crmType,
+            type: "crm",
+            name: conn.crmType,
+          });
+        });
+      } catch (crmError) {
+        console.error("Failed to fetch CRM connections:", crmError);
+      }
+
       setConnectedIntegrations(connectedOnly);
       console.log(
         "[Workflows] Connected integrations state set to:",
@@ -2224,6 +2257,64 @@ const Workflows: React.FC = () => {
     setWorkflowToDelete(null);
   };
 
+  const handleEditLabels = (workflow: Workflow) => {
+    setEditingWorkflowId(workflow.id);
+    setEditingLabels(workflow.labels || []);
+    setNewLabel("");
+    setShowLabelModal(true);
+  };
+
+  const handleAddLabel = () => {
+    const trimmed = newLabel.trim();
+    if (trimmed && !editingLabels.includes(trimmed)) {
+      setEditingLabels([...editingLabels, trimmed]);
+      setNewLabel("");
+    }
+  };
+
+  const handleRemoveLabel = (label: string) => {
+    setEditingLabels(editingLabels.filter((l) => l !== label));
+  };
+
+  const handleSaveLabels = async () => {
+    if (!editingWorkflowId) return;
+
+    try {
+      const workflow = workflows.find((w) => w.id === editingWorkflowId);
+      if (!workflow) return;
+
+      await api.workflows.update(editingWorkflowId, {
+        ...workflow,
+        labels: editingLabels,
+      });
+
+      await loadWorkflows();
+      setShowLabelModal(false);
+      setEditingWorkflowId(null);
+      setEditingLabels([]);
+    } catch (error) {
+      console.error("Failed to save labels:", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Save failed",
+        message: "Failed to save labels. Please try again.",
+        type: "error",
+      });
+    }
+  };
+
+  const getAllLabels = (): string[] => {
+    const labelSet = new Set<string>();
+    workflows.forEach((wf) => {
+      (wf.labels || []).forEach((label) => labelSet.add(label));
+    });
+    return Array.from(labelSet).sort();
+  };
+
+  const filteredWorkflows = filterLabel
+    ? workflows.filter((wf) => (wf.labels || []).includes(filterLabel))
+    : workflows;
+
   const generateGreeting = async (nodeId: string) => {
     setIsGeneratingGreeting(true);
     try {
@@ -2544,7 +2635,7 @@ const Workflows: React.FC = () => {
         );
 
         let suggestedLabel = undefined;
-        if (sourceNode?.label === "Condition") {
+        if (sourceNode?.type === "condition") {
           // Suggest "yes" for first edge, "no" for second
           suggestedLabel = existingEdgesFromSource.length === 0 ? "yes" : "no";
         }
@@ -2697,16 +2788,30 @@ const Workflows: React.FC = () => {
                   Automate agent tasks and AI responses with visual flows.
                 </p>
               </div>
-              <button
-                onClick={handleNewWorkflow}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-sm"
-              >
-                <Plus size={18} /> New Workflow
-              </button>
+              <div className="flex items-center gap-3">
+                <select
+                  value={filterLabel}
+                  onChange={(e) => setFilterLabel(e.target.value)}
+                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                >
+                  <option value="">All Labels</option>
+                  {getAllLabels().map((label) => (
+                    <option key={label} value={label}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleNewWorkflow}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-sm"
+                >
+                  <Plus size={18} /> New Workflow
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-4">
-              {workflows.map((wf) => (
+              {filteredWorkflows.map((wf) => (
                 <div
                   key={wf.id}
                   className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-all flex items-center justify-between group"
@@ -2726,18 +2831,42 @@ const Workflows: React.FC = () => {
                         {wf.name}
                       </h3>
                       <p className="text-sm text-slate-500">{wf.description}</p>
-                      <div className="flex items-center gap-4 mt-2 text-xs font-medium text-slate-400">
-                        <span className="flex items-center gap-1">
-                          <Zap size={12} /> {wf.triggerType}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Play size={12} /> {wf.runs} runs
-                        </span>
-                        <span>Last run {wf.lastRun}</span>
+                      {wf.labels && wf.labels.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {wf.labels.map((label) => (
+                            <span
+                              key={label}
+                              className="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-full border border-indigo-100"
+                            >
+                              {label}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex items-center gap-4 mt-2 text-xs text-slate-400">
+                        {wf.createdAt && (
+                          <span className="flex items-center gap-1">
+                            <Calendar size={12} /> Created{" "}
+                            {new Date(wf.createdAt).toLocaleDateString()}
+                          </span>
+                        )}
+                        {wf.updatedAt && (
+                          <span className="flex items-center gap-1">
+                            <Clock size={12} /> Edited{" "}
+                            {new Date(wf.updatedAt).toLocaleDateString()}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => handleEditLabels(wf)}
+                      className="px-3 py-2 text-sm font-medium text-slate-600 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors flex items-center gap-1"
+                      title="Manage labels"
+                    >
+                      <Tag size={16} />
+                    </button>
                     <button
                       onClick={() => handleEdit(wf)}
                       className="px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors"
@@ -3150,7 +3279,7 @@ const Workflows: React.FC = () => {
 
             {/* Center: Canvas Area */}
             <div
-              className="flex-1 bg-slate-50 relative overflow-hidden cursor-default"
+              className="flex-1 bg-slate-50 relative overflow-auto cursor-default"
               ref={canvasRef}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
@@ -3164,13 +3293,15 @@ const Workflows: React.FC = () => {
             >
               {/* Scaled Content (Connections + Nodes + Grid) */}
               <div
-                className="absolute inset-0"
+                className="min-h-full min-w-full"
                 style={{
                   transform: `scale(${canvasScale})`,
                   transformOrigin: "0 0",
                   backgroundImage:
                     "radial-gradient(#cbd5e1 1px, transparent 1px)",
                   backgroundSize: "24px 24px",
+                  width: "200%",
+                  height: "200%",
                 }}
               >
                 {/* SVG Layer for Connections */}
@@ -4730,6 +4861,199 @@ const Workflows: React.FC = () => {
                       </div>
                     )}
 
+                    {/* Specific Configuration: Say/Play */}
+                    {selectedNode.label === "Say/Play" && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Action Type
+                          </label>
+                          <select
+                            value={selectedNode.config?.playType || "say"}
+                            onChange={(e) =>
+                              updateNode(selectedNode.id, {
+                                config: {
+                                  ...selectedNode.config,
+                                  playType: e.target.value,
+                                },
+                              })
+                            }
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                          >
+                            <option value="say">Say (Text-to-Speech)</option>
+                            <option value="play">
+                              Play Audio (Music/Recording)
+                            </option>
+                          </select>
+                        </div>
+
+                        {(!selectedNode.config?.playType ||
+                          selectedNode.config?.playType === "say") && (
+                          <>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Message to Say
+                              </label>
+                              <textarea
+                                rows={4}
+                                placeholder="Thank you for calling. Please hold while we connect you to an agent..."
+                                value={selectedNode.config?.message || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      message: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                              />
+                              <p className="text-[10px] text-slate-400 mt-1">
+                                Text will be converted to speech using AI voice
+                              </p>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Voice
+                              </label>
+                              <select
+                                value={selectedNode.config?.voice || "alloy"}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      voice: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                              >
+                                <option value="alloy">Alloy (Neutral)</option>
+                                <option value="echo">Echo (Male)</option>
+                                <option value="fable">
+                                  Fable (British Male)
+                                </option>
+                                <option value="onyx">Onyx (Deep Male)</option>
+                                <option value="nova">Nova (Female)</option>
+                                <option value="shimmer">
+                                  Shimmer (Soft Female)
+                                </option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Language
+                              </label>
+                              <select
+                                value={selectedNode.config?.language || "en"}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      language: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                              >
+                                <option value="en">English</option>
+                                <option value="es">Spanish</option>
+                                <option value="fr">French</option>
+                                <option value="de">German</option>
+                                <option value="it">Italian</option>
+                                <option value="pt">Portuguese</option>
+                                <option value="zh">Chinese</option>
+                                <option value="ja">Japanese</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
+
+                        {selectedNode.config?.playType === "play" && (
+                          <>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Audio Type
+                              </label>
+                              <select
+                                value={selectedNode.config?.audioType || "hold"}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      audioType: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                              >
+                                <option value="hold">Hold Music</option>
+                                <option value="url">Custom Audio URL</option>
+                              </select>
+                            </div>
+
+                            {selectedNode.config?.audioType === "url" && (
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Audio URL
+                                </label>
+                                <input
+                                  type="url"
+                                  placeholder="https://example.com/audio.mp3"
+                                  value={selectedNode.config?.audioUrl || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        audioUrl: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  MP3 or WAV format recommended
+                                </p>
+                              </div>
+                            )}
+
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Loop
+                              </label>
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNode.config?.loop || false}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        loop: e.target.checked,
+                                      },
+                                    })
+                                  }
+                                  className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                                />
+                                <span className="text-sm text-slate-600">
+                                  Repeat audio continuously
+                                </span>
+                              </label>
+                            </div>
+                          </>
+                        )}
+
+                        <div className="text-xs text-slate-500 bg-blue-50 p-3 rounded-lg">
+                          💡{" "}
+                          {selectedNode.config?.playType === "play"
+                            ? "Audio will play while the caller is on hold or waiting"
+                            : "Text-to-speech will convert your message into natural-sounding voice"}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Specific Configuration: Incoming Message */}
                     {selectedNode.label === "Incoming Message" && (
                       <div className="pt-6 border-t border-slate-100 space-y-4">
@@ -5541,6 +5865,489 @@ const Workflows: React.FC = () => {
                       </div>
                     )}
 
+                    {(selectedNode.label === "HubSpot" ||
+                      selectedNode.label?.startsWith("HubSpot ")) && (
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                            Action
+                          </label>
+                          <select
+                            value={selectedNode.config?.action || "create"}
+                            onChange={(e) => {
+                              const action = e.target.value;
+                              const actionLabels: Record<string, string> = {
+                                create: "HubSpot Create",
+                                update: "HubSpot Update",
+                                search: "HubSpot Search",
+                                getById: "HubSpot Get",
+                                logActivity: "HubSpot Log Activity",
+                              };
+                              updateNode(selectedNode.id, {
+                                label: actionLabels[action] || "HubSpot",
+                                config: {
+                                  ...selectedNode.config,
+                                  action: action,
+                                },
+                              });
+                            }}
+                            className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          >
+                            <option value="create">Create</option>
+                            <option value="update">Update</option>
+                            <option value="search">Search/Lookup</option>
+                            <option value="getById">Get by ID</option>
+                            <option value="logActivity">Log Activity</option>
+                          </select>
+                        </div>
+
+                        {selectedNode.config?.action !== "logActivity" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Object Type
+                            </label>
+                            <select
+                              value={
+                                selectedNode.config?.objectType || "contact"
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    objectType: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            >
+                              <option value="contact">Contact</option>
+                              <option value="company">Company</option>
+                              <option value="deal">Deal</option>
+                            </select>
+                          </div>
+                        )}
+
+                        {/* GET BY ID */}
+                        {selectedNode.config?.action === "getById" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Record ID
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="123456789 or {{recordId}}"
+                              value={selectedNode.config?.recordId || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    recordId: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                        )}
+
+                        {/* UPDATE - NEED RECORD ID */}
+                        {selectedNode.config?.action === "update" && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Record ID
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="123456789 or {{recordId}}"
+                              value={selectedNode.config?.recordId || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    recordId: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                        )}
+
+                        {/* LOG ACTIVITY */}
+                        {selectedNode.config?.action === "logActivity" && (
+                          <>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Activity Type
+                              </label>
+                              <select
+                                value={
+                                  selectedNode.config?.activityType || "note"
+                                }
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      activityType: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              >
+                                <option value="note">Note</option>
+                                <option value="call">Call</option>
+                                <option value="email">Email</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Contact/Company/Deal ID
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="Associate with record ID"
+                                value={
+                                  selectedNode.config?.associatedRecordId || ""
+                                }
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      associatedRecordId: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                Subject/Notes
+                              </label>
+                              <textarea
+                                rows={4}
+                                placeholder="Activity description..."
+                                value={selectedNode.config?.activityNotes || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      activityNotes: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                              />
+                            </div>
+                            {selectedNode.config?.activityType === "call" && (
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Call Duration (seconds)
+                                </label>
+                                <input
+                                  type="number"
+                                  placeholder="300"
+                                  value={
+                                    selectedNode.config?.callDuration || ""
+                                  }
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        callDuration: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            )}
+                          </>
+                        )}
+
+                        {/* CREATE/UPDATE/SEARCH - CONTACT FIELDS */}
+                        {(selectedNode.config?.action === "create" ||
+                          selectedNode.config?.action === "update" ||
+                          selectedNode.config?.action === "search") &&
+                          (!selectedNode.config?.objectType ||
+                            selectedNode.config?.objectType === "contact") && (
+                            <>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Email
+                                </label>
+                                <input
+                                  type="email"
+                                  placeholder="contact@example.com or {{customer.email}}"
+                                  value={selectedNode.config?.email || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        email: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  First Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="John or {{customer.firstName}}"
+                                  value={selectedNode.config?.firstName || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        firstName: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Last Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Doe or {{customer.lastName}}"
+                                  value={selectedNode.config?.lastName || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        lastName: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Phone
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="+1234567890 or {{customer.phone}}"
+                                  value={selectedNode.config?.phone || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        phone: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Company Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Acme Inc or {{company.name}}"
+                                  value={selectedNode.config?.company || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        company: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </>
+                          )}
+
+                        {(selectedNode.config?.action === "create" ||
+                          selectedNode.config?.action === "update" ||
+                          selectedNode.config?.action === "search") &&
+                          selectedNode.config?.objectType === "company" && (
+                            <>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Company Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Acme Inc or {{company.name}}"
+                                  value={selectedNode.config?.companyName || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        companyName: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Domain
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="example.com"
+                                  value={selectedNode.config?.domain || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        domain: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Phone
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="+1234567890"
+                                  value={selectedNode.config?.phone || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        phone: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </>
+                          )}
+
+                        {(selectedNode.config?.action === "create" ||
+                          selectedNode.config?.action === "update" ||
+                          selectedNode.config?.action === "search") &&
+                          selectedNode.config?.objectType === "deal" && (
+                            <>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Deal Name
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="Q1 2026 Contract"
+                                  value={selectedNode.config?.dealName || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        dealName: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Amount
+                                </label>
+                                <input
+                                  type="number"
+                                  placeholder="10000"
+                                  value={selectedNode.config?.amount || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        amount: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                  Pipeline Stage
+                                </label>
+                                <input
+                                  type="text"
+                                  placeholder="qualifiedtobuy"
+                                  value={selectedNode.config?.dealStage || ""}
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        dealStage: e.target.value,
+                                      },
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </>
+                          )}
+
+                        {(selectedNode.config?.action === "create" ||
+                          selectedNode.config?.action === "update") && (
+                          <div className="text-xs text-slate-500 bg-blue-50 p-3 rounded-lg">
+                            💡 Use variables like{" "}
+                            <code className="px-1 bg-white rounded">
+                              {"{{customer.email}}"}
+                            </code>
+                            ,{" "}
+                            <code className="px-1 bg-white rounded">
+                              {"{{customer.phone}}"}
+                            </code>
+                            , or{" "}
+                            <code className="px-1 bg-white rounded">
+                              {"{{customer.name}}"}
+                            </code>{" "}
+                            to dynamically populate fields from your workflow
+                            data.
+                          </div>
+                        )}
+
+                        {selectedNode.config?.action === "search" && (
+                          <div className="text-xs text-slate-500 bg-purple-50 p-3 rounded-lg">
+                            🔍 Search will find records matching the criteria
+                            you provide. Leave fields empty to skip them in the
+                            search.
+                          </div>
+                        )}
+
+                        {selectedNode.config?.action === "getById" && (
+                          <div className="text-xs text-slate-500 bg-green-50 p-3 rounded-lg">
+                            🎯 Retrieves a specific record by its HubSpot ID.
+                            Use{" "}
+                            <code className="px-1 bg-white rounded">
+                              {"{{recordId}}"}
+                            </code>{" "}
+                            from previous steps.
+                          </div>
+                        )}
+
+                        {selectedNode.config?.action === "logActivity" && (
+                          <div className="text-xs text-slate-500 bg-orange-50 p-3 rounded-lg">
+                            📝 Logs an activity (note, call, or email) and
+                            associates it with a contact, company, or deal.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {selectedNode.label === "Upload to Drive" && (
                       <div className="pt-6 border-t border-slate-100 space-y-4">
                         <div>
@@ -5898,19 +6705,20 @@ const Workflows: React.FC = () => {
                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
                               Edge Label
                             </label>
-                            {sourceNode?.label === "Condition" ? (
+                            {sourceNode?.type === "condition" ? (
                               <select
-                                value={(selectedEdge.label || "").toLowerCase()}
+                                value={
+                                  (selectedEdge.label || "").toLowerCase() === "no"
+                                    ? "no"
+                                    : "yes"
+                                }
                                 onChange={(e) =>
                                   updateEdge(selectedEdgeId, {
-                                    label: e.target.value
-                                      ? e.target.value
-                                      : undefined,
+                                    label: e.target.value,
                                   })
                                 }
                                 className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                               >
-                                <option value="">(unset)</option>
                                 <option value="yes">yes</option>
                                 <option value="no">no</option>
                               </select>
@@ -5928,7 +6736,7 @@ const Workflows: React.FC = () => {
                               />
                             )}
                             <p className="text-[10px] text-slate-400 mt-1">
-                              {sourceNode?.label === "Condition"
+                              {sourceNode?.type === "condition"
                                 ? 'For Condition nodes, use "yes" or "no" to route based on the condition result.'
                                 : "Labels help document the flow and are used by some node types for routing."}
                             </p>
@@ -6024,6 +6832,85 @@ const Workflows: React.FC = () => {
           setAlertModal({ isOpen: false, title: "", message: "", type: "info" })
         }
       />
+
+      {/* Label Management Modal */}
+      {showLabelModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">
+                Manage Labels
+              </h3>
+              <button
+                onClick={() => setShowLabelModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="mb-4">
+              <div className="flex gap-2 mb-3">
+                <input
+                  type="text"
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddLabel();
+                    }
+                  }}
+                  placeholder="Add a label..."
+                  className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleAddLabel}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700"
+                >
+                  Add
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2 min-h-[60px] p-3 bg-slate-50 rounded-lg border border-slate-200">
+                {editingLabels.length === 0 ? (
+                  <p className="text-sm text-slate-400">No labels yet</p>
+                ) : (
+                  editingLabels.map((label) => (
+                    <span
+                      key={label}
+                      className="inline-flex items-center gap-1 px-3 py-1 bg-indigo-100 text-indigo-700 text-sm font-medium rounded-full"
+                    >
+                      {label}
+                      <button
+                        onClick={() => handleRemoveLabel(label)}
+                        className="hover:text-indigo-900"
+                      >
+                        <X size={14} />
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowLabelModal(false)}
+                className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveLabels}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

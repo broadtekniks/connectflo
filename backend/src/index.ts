@@ -16,6 +16,7 @@ import twilioWebhookRoutes, {
   initializeTwilioWebSocket,
 } from "./routes/twilioWebhooks";
 import smsWebhookRoutes from "./routes/smsWebhooks";
+import hubspotWebhookRoutes from "./routes/hubspotWebhooks";
 import workflowRoutes from "./routes/workflows";
 import workflowResourceRoutes from "./routes/workflowResources";
 import knowledgeBaseRoutes from "./routes/knowledgeBase";
@@ -42,6 +43,7 @@ import voiceConfigRoutes from "./routes/voiceConfig";
 import conditionSchemaRoutes from "./routes/conditionSchema";
 import integrationRoutes from "./routes/integrations";
 import extensionRoutes from "./routes/extensions";
+import crmConnectionRoutes from "./routes/crmConnections";
 import { authenticateToken } from "./middleware/auth";
 import {
   clearWebPhonePresence,
@@ -158,11 +160,13 @@ app.use("/api/usage", authenticateToken, usageRoutes);
 app.use("/api/voice", authenticateToken, voiceRouter);
 app.use("/api/voice-config", authenticateToken, voiceConfigRoutes);
 app.use("/api/extensions", authenticateToken, extensionRoutes);
+app.use("/api/crm-connections", authenticateToken, crmConnectionRoutes);
 app.use("/api/integrations", integrationRoutes); // Must be BEFORE the catch-all /api route
 app.use("/api", authenticateToken, conditionSchemaRoutes);
 app.use("/webhooks", webhookRoutes);
 app.use("/webhooks/twilio", twilioWebhookRoutes);
 app.use("/webhooks", smsWebhookRoutes);
+app.use("/webhooks", hubspotWebhookRoutes);
 
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);

@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { WorkflowEngine } from "../services/workflowEngine";
 import { TelnyxService } from "../services/telnyx";
+import { detectIntentFromConfiguredIntents } from "../services/intents/detectIntent";
 
 const router = Router();
 const workflowEngine = new WorkflowEngine();
@@ -214,6 +215,16 @@ router.post("/twilio/sms", async (req: Request, res: Response) => {
       }
     }
 
+    // Detect intent using tenant-configured intents (keyword matching fallback)
+    const aiConfig = await prisma.aiConfig.findUnique({
+      where: { tenantId: phoneNumber.tenantId },
+      select: { intents: true },
+    });
+    const detectedIntent = detectIntentFromConfiguredIntents(
+      String(Body || ""),
+      aiConfig?.intents
+    );
+
     const workflowContext = {
       trigger: {
         type: "Incoming Message",
@@ -237,9 +248,10 @@ router.post("/twilio/sms", async (req: Request, res: Response) => {
             status: conversation.status,
             assignedToId: conversation.assigneeId || undefined,
             subject: conversation.subject || undefined,
+            intent: detectedIntent,
             metadata: {},
           }
-        : { metadata: {} },
+        : { intent: detectedIntent, metadata: {} },
       message: {
         from: From,
         to: To,
@@ -465,6 +477,16 @@ router.post("/telnyx/sms", async (req: Request, res: Response) => {
       }
     }
 
+    // Detect intent using tenant-configured intents (keyword matching fallback)
+    const aiConfig = await prisma.aiConfig.findUnique({
+      where: { tenantId: phoneNumber.tenantId },
+      select: { intents: true },
+    });
+    const detectedIntent = detectIntentFromConfiguredIntents(
+      String(Body || ""),
+      aiConfig?.intents
+    );
+
     const workflowContext = {
       trigger: {
         type: "Incoming Message",
@@ -488,9 +510,10 @@ router.post("/telnyx/sms", async (req: Request, res: Response) => {
             status: conversation.status,
             assignedToId: conversation.assigneeId || undefined,
             subject: conversation.subject || undefined,
+            intent: detectedIntent,
             metadata: {},
           }
-        : { metadata: {} },
+        : { intent: detectedIntent, metadata: {} },
       message: {
         from: From,
         to: To,

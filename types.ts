@@ -166,4 +166,7 @@ export interface Workflow {
   phoneVoiceLanguage?: string | null;
   businessTimeZone?: string | null;
   businessHours?: any | null;
+  labels?: string[];
+  createdAt?: string;
+  updatedAt?: string;
 }

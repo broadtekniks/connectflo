@@ -2,6 +2,7 @@ import { realtimeVoiceService } from "./ai/realtimeVoice";
 import { TelnyxService } from "./telnyx";
 import prisma from "../lib/prisma";
 import { applyToneOfVoiceToSystemPrompt } from "./ai/toneOfVoice";
+import { detectIntentFromConfiguredIntents } from "./intents/detectIntent";
 
 const telnyxService = new TelnyxService();
 
@@ -45,6 +46,8 @@ interface HybridSession {
   voice: string;
   language: string;
   systemPrompt: string;
+  intents?: unknown;
+  detectedIntent?: string;
 }
 
 export interface VoiceOption {
@@ -230,6 +233,8 @@ class HybridVoiceService {
     let systemPrompt =
       "You are a helpful AI assistant for customer support. Keep responses brief, natural, and conversational.";
 
+    let configuredIntents: unknown = undefined;
+
     if (workflowId && workflowId !== "default") {
       try {
         const workflow = await prisma.workflow.findUnique({
@@ -281,6 +286,7 @@ class HybridVoiceService {
         }
 
         if (workflow?.aiConfig) {
+          configuredIntents = (workflow as any)?.aiConfig?.intents;
           agentName = workflow.aiConfig.name || "AI Assistant";
           const businessDescription =
             workflow.aiConfig.businessDescription || "";
@@ -312,6 +318,18 @@ class HybridVoiceService {
       }
     }
 
+    if (!configuredIntents) {
+      try {
+        const aiConfig = await prisma.aiConfig.findUnique({
+          where: { tenantId },
+          select: { intents: true },
+        });
+        configuredIntents = aiConfig?.intents;
+      } catch {
+        // ignore
+      }
+    }
+
     const session: HybridSession = {
       sessionId,
       callControlId,
@@ -322,6 +340,8 @@ class HybridVoiceService {
       voice,
       language,
       systemPrompt,
+      intents: configuredIntents,
+      detectedIntent: detectIntentFromConfiguredIntents("", configuredIntents),
     };
 
     this.sessions.set(callControlId, session);
@@ -368,6 +388,16 @@ class HybridVoiceService {
     if (!session || !session.isListening) return;
 
     console.log(`[Hybrid] User said: ${transcript}`);
+
+    // Update detected intent from the latest transcript (best-effort).
+    try {
+      session.detectedIntent = detectIntentFromConfiguredIntents(
+        transcript,
+        session.intents
+      );
+    } catch {
+      // ignore
+    }
 
     // Stop listening while we process
     await telnyxService.stopTranscription(callControlId);

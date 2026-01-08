@@ -76,6 +76,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       isActive,
       triggerType,
       assignedAgentId,
+      labels,
     } = req.body;
     const tenantId = authReq.user?.tenantId;
 
@@ -132,6 +133,7 @@ router.put("/:id", async (req: Request, res: Response) => {
         ...(nextAssignedAgentId !== undefined
           ? { assignedAgentId: nextAssignedAgentId }
           : {}),
+        ...(labels !== undefined ? { labels } : {}),
       },
     });
 

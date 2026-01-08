@@ -1,6 +1,19 @@
 import React, { useState, useEffect } from "react";
 import { MOCK_INTEGRATIONS } from "../constants";
-import { Check, Plus, Unplug, Search, Box, Loader2 } from "lucide-react";
+import {
+  Check,
+  Plus,
+  Unplug,
+  Search,
+  Box,
+  Loader2,
+  Settings,
+  Database,
+  AlertCircle,
+  RefreshCw,
+  Trash2,
+  BookOpen,
+} from "lucide-react";
 import { Integration } from "../types";
 import { api } from "../services/api";
 import AlertModal from "../components/AlertModal";
@@ -17,6 +30,21 @@ const CATEGORIES: { id: string; label: string }[] = [
   { id: "ACCOUNTING", label: "Accounting" },
   { id: "STORAGE", label: "Storage" },
 ];
+
+// CRM providers that require credential input
+const CRM_PROVIDERS: Record<string, string> = {
+  "int-hub": "hubspot",
+  "int-sf": "salesforce",
+  "int-zoho": "zoho",
+  "int-odoo": "odoo",
+};
+
+// Integrations that have setup guides
+const INTEGRATION_GUIDES: Record<string, boolean> = {
+  "int-hub": true,
+  "int-sf": true,
+  // Add more as guides are created
+};
 
 // Component to handle icon loading errors gracefully
 const IntegrationIcon: React.FC<{ integration: Integration }> = ({
@@ -50,12 +78,25 @@ const Integrations: React.FC = () => {
     null
   );
   const [showDisconnectModal, setShowDisconnectModal] = useState(false);
+  const [crmDisconnectTarget, setCrmDisconnectTarget] = useState<any | null>(
+    null
+  );
+  const [showCrmDisconnectModal, setShowCrmDisconnectModal] = useState(false);
+  const [crmDisconnecting, setCrmDisconnecting] = useState(false);
   const [alertModal, setAlertModal] = useState<{
     isOpen: boolean;
     title: string;
     message: string;
     type: "success" | "error" | "info";
   }>({ isOpen: false, title: "", message: "", type: "info" });
+
+  // CRM Connection state
+  const [crmConnections, setCrmConnections] = useState<any[]>([]);
+  const [showCrmModal, setShowCrmModal] = useState(false);
+  const [showCredentialsModal, setShowCredentialsModal] = useState(false);
+  const [selectedCrm, setSelectedCrm] = useState<any>(null);
+  const [crmCredentials, setCrmCredentials] = useState<any>({});
+  const [crmLoading, setCrmLoading] = useState(false);
 
   // Map integration ID to Google type
   const getGoogleType = (intId: string): string | null => {
@@ -137,9 +178,57 @@ const Integrations: React.FC = () => {
     }
   };
 
+  const fetchCrmConnections = async () => {
+    try {
+      const connections = await api.crmConnections.list();
+      setCrmConnections(connections);
+
+      // Mark CRM integrations as connected
+      const crmIds = new Set<string>();
+      connections
+        .filter(
+          (conn: any) => String(conn?.status || "").toLowerCase() === "active"
+        )
+        .forEach((conn: any) => {
+          const intId = Object.keys(CRM_PROVIDERS).find(
+            (key) => CRM_PROVIDERS[key] === conn.crmType
+          );
+          if (intId) crmIds.add(intId);
+        });
+
+      setConnectedIntegrations((prev) => {
+        const next = new Set(prev);
+        // First remove any CRM integration IDs, then add back active ones.
+        Object.keys(CRM_PROVIDERS).forEach((id) => next.delete(id));
+        crmIds.forEach((id) => next.add(id));
+        return next;
+      });
+    } catch (error) {
+      console.error("Failed to fetch CRM connections:", error);
+    }
+  };
+
+  useEffect(() => {
+    fetchCrmConnections();
+  }, []);
+
   const handleConnect = async (integration: Integration) => {
     const googleType = getGoogleType(integration.id);
+    const crmProvider = CRM_PROVIDERS[integration.id];
 
+    // Handle CRM connections
+    if (crmProvider) {
+      setSelectedCrm({
+        integrationId: integration.id,
+        provider: crmProvider,
+        name: integration.name,
+        credentials: {},
+      });
+      setShowCrmModal(true);
+      return;
+    }
+
+    // Handle Google OAuth
     if (!googleType) {
       setAlertModal({
         isOpen: true,
@@ -176,6 +265,29 @@ const Integrations: React.FC = () => {
   };
 
   const handleDisconnect = async (integration: Integration) => {
+    const crmProvider = CRM_PROVIDERS[integration.id];
+
+    // Handle CRM disconnection
+    if (crmProvider) {
+      const connection = crmConnections.find(
+        (c) =>
+          (c as any).crmType === crmProvider ||
+          (c as any).provider === crmProvider
+      );
+      if (connection) {
+        setCrmDisconnectTarget(connection);
+        setShowCrmDisconnectModal(true);
+      } else {
+        setAlertModal({
+          isOpen: true,
+          title: "Not Connected",
+          message: "No active CRM connection was found for this provider.",
+          type: "info",
+        });
+      }
+      return;
+    }
+
     setDisconnectTarget(integration);
     setShowDisconnectModal(true);
   };
@@ -223,9 +335,170 @@ const Integrations: React.FC = () => {
     }
   };
 
+  const handleCancelCrmDisconnect = () => {
+    setShowCrmDisconnectModal(false);
+    setCrmDisconnectTarget(null);
+  };
+
   const handleCancelDisconnect = () => {
     setShowDisconnectModal(false);
     setDisconnectTarget(null);
+  };
+
+  const handleConnectCrm = (provider: string) => {
+    setSelectedCrm({ provider, name: "", credentials: {} });
+    setShowCrmModal(true);
+  };
+
+  const handleSaveCrmConnection = async () => {
+    if (!selectedCrm) return;
+
+    setCrmLoading(true);
+    try {
+      await api.crmConnections.create({
+        crmType: selectedCrm.provider as any,
+        name: selectedCrm.name,
+        credentials: crmCredentials,
+      });
+
+      setAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "CRM connection created successfully!",
+        type: "success",
+      });
+
+      setShowCrmModal(false);
+      setSelectedCrm(null);
+      setCrmCredentials({});
+      fetchCrmConnections();
+    } catch (error: any) {
+      console.error("Failed to create CRM connection:", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Connection Failed",
+        message:
+          error.response?.data?.error ||
+          "Failed to connect to CRM. Please check your credentials and try again.",
+        type: "error",
+      });
+    } finally {
+      setCrmLoading(false);
+    }
+  };
+
+  const handleUpdateCrmCredentials = async () => {
+    if (!selectedCrm?.id) return;
+
+    setCrmLoading(true);
+    try {
+      await api.crmConnections.updateCredentials(
+        selectedCrm.id,
+        crmCredentials
+      );
+
+      setAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "Credentials updated successfully!",
+        type: "success",
+      });
+
+      setShowCredentialsModal(false);
+      setSelectedCrm(null);
+      setCrmCredentials({});
+      fetchCrmConnections();
+    } catch (error: any) {
+      console.error("Failed to update credentials:", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Update Failed",
+        message:
+          error.response?.data?.error ||
+          "Failed to update credentials. Please try again.",
+        type: "error",
+      });
+    } finally {
+      setCrmLoading(false);
+    }
+  };
+
+  const handleConfirmCrmDisconnect = async () => {
+    if (!crmDisconnectTarget?.id || crmDisconnecting) return;
+
+    setCrmDisconnecting(true);
+    try {
+      await api.crmConnections.delete(crmDisconnectTarget.id);
+
+      // Optimistically update UI immediately (avoid requiring a manual refresh)
+      setCrmConnections((prev) =>
+        prev.map((c: any) =>
+          c?.id === crmDisconnectTarget.id ? { ...c, status: "disabled" } : c
+        )
+      );
+      setConnectedIntegrations((prev) => {
+        const next = new Set(prev);
+        const crmType =
+          crmDisconnectTarget?.crmType || crmDisconnectTarget?.provider;
+        const intId = Object.keys(CRM_PROVIDERS).find(
+          (key) => CRM_PROVIDERS[key] === crmType
+        );
+        if (intId) next.delete(intId);
+        return next;
+      });
+
+      setAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "CRM disconnected successfully!",
+        type: "success",
+      });
+
+      setShowCrmDisconnectModal(false);
+      setCrmDisconnectTarget(null);
+      fetchCrmConnections();
+    } catch (error) {
+      console.error("Failed to delete CRM connection:", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Error",
+        message: "Failed to disconnect CRM. Please try again.",
+        type: "error",
+      });
+    } finally {
+      setCrmDisconnecting(false);
+    }
+  };
+
+  const handleTestCrmConnection = async (id: string) => {
+    try {
+      await api.crmConnections.test(id);
+
+      setAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "Connection test successful!",
+        type: "success",
+      });
+    } catch (error: any) {
+      console.error("Connection test failed:", error);
+      setAlertModal({
+        isOpen: true,
+        title: "Test Failed",
+        message:
+          error.response?.data?.error ||
+          "Failed to connect. Please check your credentials.",
+        type: "error",
+      });
+    }
+  };
+
+  const handleViewGuide = (integration: Integration) => {
+    const crmProvider = CRM_PROVIDERS[integration.id];
+    if (crmProvider) {
+      window.history.pushState({}, "", `/integrations/guide/${crmProvider}`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
   };
 
   const filteredIntegrations = MOCK_INTEGRATIONS.filter((int) => {
@@ -305,6 +578,9 @@ const Integrations: React.FC = () => {
                 const isConnected = connectedIntegrations.has(int.id);
                 const isConnecting = connectingId === int.id;
                 const googleType = getGoogleType(int.id);
+                const crmProvider = CRM_PROVIDERS[int.id];
+                const isAvailable = googleType || crmProvider;
+                const hasGuide = INTEGRATION_GUIDES[int.id];
 
                 return (
                   <div
@@ -322,9 +598,9 @@ const Integrations: React.FC = () => {
                       ) : (
                         <button
                           onClick={() => handleConnect(int)}
-                          disabled={isConnecting || !googleType}
+                          disabled={isConnecting || !isAvailable}
                           className={`text-[10px] font-bold px-2 py-1 rounded-full transition-colors flex items-center gap-1 ${
-                            !googleType
+                            !isAvailable
                               ? "text-slate-400 bg-slate-50 cursor-not-allowed"
                               : "text-indigo-600 bg-indigo-50 hover:bg-indigo-100"
                           }`}
@@ -334,7 +610,7 @@ const Integrations: React.FC = () => {
                               <Loader2 size={10} className="animate-spin" />
                               Connecting...
                             </>
-                          ) : googleType ? (
+                          ) : isAvailable ? (
                             "Connect"
                           ) : (
                             "Coming Soon"
@@ -351,6 +627,18 @@ const Integrations: React.FC = () => {
                     <p className="text-xs text-slate-600 mb-4 flex-1 leading-relaxed">
                       {int.description}
                     </p>
+
+                    {/* Setup Guide Link */}
+                    {hasGuide && !isConnected && (
+                      <button
+                        onClick={() => handleViewGuide(int)}
+                        className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-700 font-medium mb-3 transition-colors"
+                      >
+                        <BookOpen size={14} />
+                        View Setup Guide
+                      </button>
+                    )}
+
                     {isConnected && (
                       <div className="flex justify-between items-center pt-3 border-t border-slate-100 mt-auto">
                         <span className="text-xs font-medium text-green-600">
@@ -407,6 +695,348 @@ const Integrations: React.FC = () => {
         onConfirm={handleConfirmDisconnect}
         onCancel={handleCancelDisconnect}
       />
+
+      <ConfirmationModal
+        isOpen={showCrmDisconnectModal}
+        title="Disconnect CRM?"
+        message={
+          crmDisconnectTarget?.name
+            ? `Disconnect ${crmDisconnectTarget.name} from this tenant? Sync history will be preserved.`
+            : "Disconnect this CRM from this tenant? Sync history will be preserved."
+        }
+        confirmLabel={crmDisconnecting ? "Disconnecting..." : "Disconnect"}
+        cancelLabel="Cancel"
+        isDestructive
+        onConfirm={handleConfirmCrmDisconnect}
+        onCancel={handleCancelCrmDisconnect}
+      />
+
+      {/* CRM Connection Modal */}
+      {showCrmModal && selectedCrm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-slate-900 mb-4">
+              Connect {selectedCrm.name}
+            </h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Connection Name
+                </label>
+                <input
+                  type="text"
+                  value={selectedCrm.name}
+                  onChange={(e) =>
+                    setSelectedCrm({ ...selectedCrm, name: e.target.value })
+                  }
+                  placeholder="My HubSpot Connection"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              {selectedCrm.provider === "hubspot" && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.accessToken || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          accessToken: e.target.value,
+                        })
+                      }
+                      placeholder="pat-na1-..."
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Get this from HubSpot Settings → Integrations → Private
+                      Apps
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {selectedCrm.provider === "salesforce" && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Instance URL
+                    </label>
+                    <input
+                      type="text"
+                      value={crmCredentials.instanceUrl || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          instanceUrl: e.target.value,
+                        })
+                      }
+                      placeholder="https://yourinstance.salesforce.com"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.accessToken || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          accessToken: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </>
+              )}
+
+              {selectedCrm.provider === "zoho" && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.accessToken || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          accessToken: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Refresh Token
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.refreshToken || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          refreshToken: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </>
+              )}
+
+              {selectedCrm.provider === "odoo" && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      URL
+                    </label>
+                    <input
+                      type="text"
+                      value={crmCredentials.url || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          url: e.target.value,
+                        })
+                      }
+                      placeholder="https://yourcompany.odoo.com"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Database
+                    </label>
+                    <input
+                      type="text"
+                      value={crmCredentials.database || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          database: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Username
+                    </label>
+                    <input
+                      type="text"
+                      value={crmCredentials.username || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          username: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.apiKey || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          apiKey: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowCrmModal(false);
+                  setSelectedCrm(null);
+                  setCrmCredentials({});
+                }}
+                disabled={crmLoading}
+                className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveCrmConnection}
+                disabled={crmLoading}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {crmLoading ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  "Connect"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update CRM Credentials Modal */}
+      {showCredentialsModal && selectedCrm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-slate-900 mb-4">
+              Update Credentials
+            </h2>
+            <p className="text-sm text-slate-600 mb-4">
+              Update credentials for <strong>{selectedCrm.name}</strong>
+            </p>
+            <div className="space-y-4">
+              {selectedCrm.provider === "hubspot" && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Access Token
+                  </label>
+                  <input
+                    type="password"
+                    value={crmCredentials.accessToken || ""}
+                    onChange={(e) =>
+                      setCrmCredentials({
+                        ...crmCredentials,
+                        accessToken: e.target.value,
+                      })
+                    }
+                    placeholder="pat-na1-..."
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              )}
+
+              {selectedCrm.provider === "salesforce" && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Instance URL
+                    </label>
+                    <input
+                      type="text"
+                      value={crmCredentials.instanceUrl || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          instanceUrl: e.target.value,
+                        })
+                      }
+                      placeholder="https://yourinstance.salesforce.com"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={crmCredentials.accessToken || ""}
+                      onChange={(e) =>
+                        setCrmCredentials({
+                          ...crmCredentials,
+                          accessToken: e.target.value,
+                        })
+                      }
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowCredentialsModal(false);
+                  setSelectedCrm(null);
+                  setCrmCredentials({});
+                }}
+                disabled={crmLoading}
+                className="px-4 py-2 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUpdateCrmCredentials}
+                disabled={crmLoading}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {crmLoading ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Updating...
+                  </>
+                ) : (
+                  "Update"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
