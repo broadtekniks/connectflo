@@ -2435,23 +2435,28 @@ const Workflows: React.FC = () => {
     }
 
     // Visual simulation: highlight nodes as they would execute
-    let currentNodeId = triggerNode?.id || nodes[0]?.id;
-    let visitedNodes = new Set<string>();
-    const maxSteps = 20; // Prevent infinite loops
+    const startNodeId = triggerNode?.id || nodes[0]?.id;
+    const visitedNodes = new Set<string>();
+    const pendingNodeIds: string[] = startNodeId ? [startNodeId] : [];
+    const maxSteps = Math.min(200, Math.max(20, nodes.length * 5));
     let step = 0;
 
     const executeStep = () => {
-      if (!currentNodeId) {
-        setIsSimulating(false);
-        setActiveSimNodeId(null);
-        setSimulationStatus({ state: "error", message: "Simulation halted" });
-        return;
-      }
+      const nextId = pendingNodeIds.shift();
 
-      if (visitedNodes.has(currentNodeId)) {
-        setIsSimulating(false);
-        setActiveSimNodeId(null);
-        setSimulationStatus({ state: "error", message: "Loop detected" });
+      if (!nextId) {
+        setTimeout(() => {
+          setIsSimulating(false);
+          setActiveSimNodeId(null);
+          setSimulationStatus({ state: "success", message: "Completed" });
+
+          simulationStatusResetTimeoutRef.current = setTimeout(() => {
+            setSimulationStatus((prev) =>
+              prev.state === "success" ? { state: "idle" } : prev
+            );
+            simulationStatusResetTimeoutRef.current = null;
+          }, 3000);
+        }, 1000);
         return;
       }
 
@@ -2462,7 +2467,7 @@ const Workflows: React.FC = () => {
         return;
       }
 
-      const currentNode = nodes.find((n) => n.id === currentNodeId);
+      const currentNode = nodes.find((n) => n.id === nextId);
       if (!currentNode) {
         setIsSimulating(false);
         setActiveSimNodeId(null);
@@ -2470,40 +2475,37 @@ const Workflows: React.FC = () => {
         return;
       }
 
-      visitedNodes.add(currentNodeId);
-      setActiveSimNodeId(currentNodeId);
+      // If we converge back to a node we've already shown, skip it (don't treat as a loop).
+      if (visitedNodes.has(nextId)) {
+        executeStep();
+        return;
+      }
+
+      visitedNodes.add(nextId);
+      setActiveSimNodeId(nextId);
       step++;
 
-      // Find next node based on edges
-      const outgoingEdges = edges.filter((e) => e.source === currentNodeId);
+      // Find next nodes based on edges
+      const outgoingEdges = edges.filter((e) => e.source === nextId);
+
+      // Enqueue all outgoing targets (this makes condition nodes show both yes/no paths)
+      for (const edge of outgoingEdges) {
+        if (edge?.target && !visitedNodes.has(edge.target)) {
+          pendingNodeIds.push(edge.target);
+        }
+      }
 
       setTimeout(() => {
-        if (outgoingEdges.length > 0) {
-          // For condition nodes, show both paths briefly
-          if (currentNode?.type === "condition" && outgoingEdges.length > 1) {
-            // Highlight all outgoing edges briefly
-            currentNodeId = outgoingEdges[0].target;
-          } else {
-            currentNodeId = outgoingEdges[0].target;
-          }
-          executeStep();
-        } else {
-          // End of workflow
-          setTimeout(() => {
-            setIsSimulating(false);
-            setActiveSimNodeId(null);
-            setSimulationStatus({ state: "success", message: "Completed" });
-
-            simulationStatusResetTimeoutRef.current = setTimeout(() => {
-              setSimulationStatus((prev) =>
-                prev.state === "success" ? { state: "idle" } : prev
-              );
-              simulationStatusResetTimeoutRef.current = null;
-            }, 3000);
-          }, 1000);
-        }
+        executeStep();
       }, 800);
     };
+
+    if (!startNodeId) {
+      setIsSimulating(false);
+      setActiveSimNodeId(null);
+      setSimulationStatus({ state: "error", message: "No start node" });
+      return;
+    }
 
     executeStep();
   };
@@ -4666,6 +4668,71 @@ const Workflows: React.FC = () => {
                             <span>Respect working hours</span>
                           </label>
                         </div>
+
+                        <div className="pt-2 space-y-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Transfer Announcement
+                            </label>
+                            <textarea
+                              rows={3}
+                              placeholder="Please hold while I transfer you to an agent."
+                              value={selectedNode.config?.transferAnnouncement || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    transferAnnouncement: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Played to the caller before dialing.
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Ringback Tone (optional)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="us"
+                              value={selectedNode.config?.ringTone || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    ringTone: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Twilio ringback override (e.g. <span className="font-mono">us</span>, <span className="font-mono">uk</span>, <span className="font-mono">au</span>). Leave blank for default.
+                            </p>
+                          </div>
+
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedNode.config?.fallbackToVoicemail ?? false}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    fallbackToVoicemail: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Send to voicemail if no agent answers</span>
+                          </label>
+                        </div>
                       </div>
                     )}
 
@@ -4856,6 +4923,71 @@ const Workflows: React.FC = () => {
                               className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
                             />
                             <span>Respect working hours</span>
+                          </label>
+                        </div>
+
+                        <div className="pt-2 space-y-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Transfer Announcement
+                            </label>
+                            <textarea
+                              rows={3}
+                              placeholder="Please hold while I transfer you to an agent."
+                              value={selectedNode.config?.transferAnnouncement || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    transferAnnouncement: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Played to the caller before dialing.
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                              Ringback Tone (optional)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="us"
+                              value={selectedNode.config?.ringTone || ""}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    ringTone: e.target.value,
+                                  },
+                                })
+                              }
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Ringback override (e.g. <span className="font-mono">us</span>, <span className="font-mono">uk</span>, <span className="font-mono">au</span>). Leave blank for default.
+                            </p>
+                          </div>
+
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedNode.config?.fallbackToVoicemail ?? false}
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    fallbackToVoicemail: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Send to voicemail if no agent answers</span>
                           </label>
                         </div>
                       </div>

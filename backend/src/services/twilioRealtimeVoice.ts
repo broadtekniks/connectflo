@@ -9,16 +9,97 @@ import { EmailService } from "./email";
 import { detectIntentFromConfiguredIntents } from "./intents/detectIntent";
 import { GoogleCalendarService } from "./integrations/google/calendar";
 import { CRMService } from "./crm";
+import {
+  normalizeWorkingHoursConfig,
+  isNowWithinWorkingHours,
+} from "./agentSchedule";
+import { isTenantOpenNow } from "./businessHours";
+import { isWebPhoneReady } from "./webPhonePresence";
+import { toTwilioClientIdentity } from "./twilioClientIdentity";
 
 const END_CALL_MARKER = "[[END_CALL]]";
 
 const VOICE_CALL_RUNTIME_INSTRUCTIONS = [
   "You are speaking with a caller on a live phone call.",
   "Keep responses concise and conversational.",
+  "If the caller asks to speak with a human/agent/representative, acknowledge and say you are transferring them now.",
   "If the caller asks to end the call, respond with a brief goodbye and confirm you are ending the call.",
   `If you decide the call should be ended now, include the token ${END_CALL_MARKER} in your TEXT output only (do not say the token out loud).`,
   "If the caller says they are done (e.g. 'that's all', 'bye', 'goodbye', 'thank you'), you should thank them, say a short goodbye, and end the call.",
 ].join("\n");
+
+function escapeXmlAttr(value: string): string {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function escapeXmlText(value: string): string {
+  return escapeXmlAttr(value);
+}
+
+function normalizeTwilioSayText(raw: string): string {
+  const text = (raw || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const maxChars = 2000;
+  return text.length > maxChars ? text.slice(0, maxChars).trim() : text;
+}
+
+function normalizeE164Like(raw: string): string {
+  const v = String(raw || "").trim();
+  if (!v) return "";
+  return v.replace(/[^+0-9]/g, "");
+}
+
+function normalizeDialNumber(raw: string): string {
+  const v = normalizeE164Like(raw);
+  if (!v) return "";
+  if (v.startsWith("+") && v.length >= 11) return v;
+
+  // Best-effort normalization for common US formats.
+  const digits = v.replace(/[^0-9]/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+
+  // If we can't confidently normalize, return as-is.
+  return v;
+}
+
+function normalizeDialCallerId(raw: string): string {
+  const v = normalizeDialNumber(raw);
+  // Twilio expects a verified callerId (typically a Twilio number) and generally prefers +E164.
+  if (!v.startsWith("+")) return "";
+  return v;
+}
+
+function deriveTransferDialActionUrl(params: {
+  fallback: "stream" | "voicemail";
+  phoneNumberId?: string;
+}): string {
+  const base = String(process.env.TWILIO_WEBHOOK_URL || "").trim();
+  // TWILIO_WEBHOOK_URL is commonly set to .../voice or .../webhooks/twilio
+  let urlBase = "";
+  if (base.endsWith("/voice")) urlBase = base.replace(/\/voice$/, "");
+  else urlBase = base;
+
+  const actionPath = urlBase.endsWith("/webhooks/twilio")
+    ? `${urlBase}/transfer-dial-action`
+    : urlBase
+    ? urlBase.endsWith("/")
+      ? `${urlBase}transfer-dial-action`
+      : `${urlBase}/transfer-dial-action`
+    : "";
+
+  if (!actionPath) return "";
+  const u = new URL(actionPath);
+  u.searchParams.set("fallback", params.fallback);
+  if (params.phoneNumberId)
+    u.searchParams.set("phoneNumberId", params.phoneNumberId);
+  return u.toString();
+}
 
 function normalizeGreeting(raw: string, agentName?: string): string {
   const fallback = `Hello! This is ${
@@ -245,6 +326,9 @@ interface TwilioRealtimeSession {
   responseInProgress?: boolean;
   pendingHangupReason?: string;
   hangupAfterThisResponse?: boolean;
+  transferInProgress?: boolean;
+  transferRequested?: boolean;
+  transferReason?: string;
   heardUserSpeech?: boolean;
   bargeInActive?: boolean;
   responseRequested?: boolean;
@@ -1425,6 +1509,471 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     }
   }
 
+  private async initiateHumanTransfer(
+    sessionId: string,
+    reason: string
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (session.transferInProgress) return;
+    session.transferInProgress = true;
+
+    const transfer = (session.workflowContext?.call as any)?.humanTransfer;
+    const nodeLabel = String(transfer?.nodeLabel || "").trim();
+    const config = transfer?.config || {};
+
+    const callerId = String(
+      session.workflowContext?.trigger?.phoneNumber ||
+        session.workflowContext?.call?.to ||
+        ""
+    ).trim();
+
+    const callerIdForDial = normalizeDialCallerId(callerId);
+
+    const phoneNumberId = String(
+      session.workflowContext?.trigger?.phoneNumberId ||
+        session.workflowContext?.call?.phoneNumberId ||
+        ""
+    ).trim();
+
+    const ringToneConfigured = String(config?.ringTone || "").trim();
+    const transferAnnouncement =
+      normalizeTwilioSayText(String(config?.transferAnnouncement || "")) ||
+      "Please hold while I transfer you to an agent.";
+    const fallbackToVoicemail = Boolean(config?.fallbackToVoicemail ?? false);
+
+    const timeoutSeconds = Number(config?.timeoutSeconds ?? 30);
+    const timeout =
+      Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+        ? Math.min(60, Math.max(5, timeoutSeconds))
+        : 30;
+
+    type ResolvedTargets = {
+      numbers: string[];
+      clients: string[];
+      sequential?: boolean;
+    };
+
+    const tenantId = String(session.tenantId || "").trim();
+
+    const tenant = tenantId
+      ? await (prisma as any).tenant.findUnique({
+          where: { id: tenantId },
+          select: {
+            businessTimeZone: true,
+            businessHours: true,
+            restrictExternalForwarding: true,
+            externalForwardingAllowList: true,
+          },
+        })
+      : null;
+
+    const tenantTimeZone = String(tenant?.businessTimeZone || "").trim();
+    const tenantHours = normalizeWorkingHoursConfig(
+      (tenant as any)?.businessHours as any
+    );
+
+    const shouldRespectWorkingHours = Boolean(
+      config?.respectWorkingHours ?? true
+    );
+    const onlyCheckedIn = Boolean(config?.onlyCheckedIn ?? true);
+
+    const isTenantOpen =
+      tenantTimeZone && tenantHours && shouldRespectWorkingHours
+        ? isTenantOpenNow({
+            tenant: {
+              timeZone: tenantTimeZone,
+              businessHours: tenantHours as any,
+            },
+          })
+        : true;
+
+    const agentIsOpenNow = (user: any): boolean => {
+      if (!shouldRespectWorkingHours) return true;
+      const userTz = String(user?.agentTimeZone || "").trim();
+      const userHours = normalizeWorkingHoursConfig(user?.workingHours);
+      if (userTz && userHours) {
+        return isNowWithinWorkingHours({
+          workingHours: userHours,
+          timeZone: userTz,
+        }).isOpen;
+      }
+      if (tenantTimeZone && tenantHours) return isTenantOpen;
+      return true;
+    };
+
+    const userTargets = (user: any): ResolvedTargets => {
+      const numbers: string[] = [];
+      const clients: string[] = [];
+
+      const ready =
+        tenantId && user?.id
+          ? isWebPhoneReady({ tenantId, userId: String(user.id) })
+          : false;
+      if (ready) {
+        clients.push(
+          toTwilioClientIdentity({ tenantId, userId: String(user.id) })
+        );
+      }
+
+      const number = normalizeE164Like(
+        user?.forwardingPhoneNumber || user?.phoneNumber || ""
+      );
+      if (number) numbers.push(number);
+
+      return { numbers, clients };
+    };
+
+    const userIsAvailable = (user: any): boolean => {
+      const ready =
+        tenantId && user?.id
+          ? isWebPhoneReady({ tenantId, userId: String(user.id) })
+          : false;
+      if (onlyCheckedIn && !user?.isCheckedIn && !ready) return false;
+      if (!agentIsOpenNow(user)) return false;
+      const targets = userTargets(user);
+      return targets.numbers.length > 0 || targets.clients.length > 0;
+    };
+
+    const isAllowedExternalNumber = (number: string): boolean => {
+      if (!(tenant as any)?.restrictExternalForwarding) return true;
+      const allowList = Array.isArray(
+        (tenant as any)?.externalForwardingAllowList
+      )
+        ? (tenant as any).externalForwardingAllowList
+        : [];
+      const normalizedAllow = allowList
+        .map((n: any) => normalizeE164Like(String(n || "")))
+        .filter(Boolean);
+      const normalizedNumber = normalizeE164Like(number);
+      return normalizedAllow.includes(normalizedNumber);
+    };
+
+    const resolveFromWorkflowConfig =
+      async (): Promise<ResolvedTargets | null> => {
+        if (!nodeLabel) return null;
+
+        // Call Forwarding
+        if (nodeLabel === "Call Forwarding") {
+          const overrideNumber = normalizeE164Like(
+            String(
+              config?.overrideNumber ?? config?.forwardingNumberOverride ?? ""
+            )
+          );
+          if (overrideNumber) {
+            if (!isAllowedExternalNumber(overrideNumber)) return null;
+            return { numbers: [overrideNumber], clients: [] };
+          }
+
+          const targetType = String(config?.targetType || "external").trim();
+          if (targetType === "external") {
+            const number = normalizeE164Like(
+              String(config?.externalNumber || "")
+            );
+            console.log(
+              `[TwilioRealtime] Call Forwarding resolving external number: ${
+                number || "(none)"
+              }`
+            );
+            if (!number) {
+              console.warn(
+                `[TwilioRealtime] Call Forwarding: externalNumber is empty`
+              );
+              return null;
+            }
+            if (!isAllowedExternalNumber(number)) {
+              console.warn(
+                `[TwilioRealtime] Call Forwarding: external number ${number} blocked by allow-list`
+              );
+              return null;
+            }
+            console.log(
+              `[TwilioRealtime] Call Forwarding: external number ${number} allowed, returning as target`
+            );
+            return { numbers: [number], clients: [] };
+          }
+
+          if (targetType === "user") {
+            const userId = String(config?.userId || "").trim();
+            if (!userId) return null;
+            const user = await prisma.user.findFirst({
+              where: {
+                id: userId,
+                tenantId,
+                role: { in: ["TENANT_ADMIN", "AGENT"] },
+              },
+              select: {
+                id: true,
+                isCheckedIn: true,
+                agentTimeZone: true,
+                workingHours: true,
+                forwardingPhoneNumber: true,
+                phoneNumber: true,
+              } as any,
+            });
+            if (!user || !userIsAvailable(user)) return null;
+            return userTargets(user);
+          }
+
+          if (targetType === "callGroup") {
+            const callGroupId = String(config?.callGroupId || "").trim();
+            if (!callGroupId) return null;
+            const group = await (prisma as any).callGroup.findFirst({
+              where: { id: callGroupId, tenantId },
+              include: {
+                members: {
+                  orderBy: { order: "asc" },
+                  include: {
+                    user: {
+                      select: {
+                        id: true,
+                        isCheckedIn: true,
+                        agentTimeZone: true,
+                        workingHours: true,
+                        forwardingPhoneNumber: true,
+                        phoneNumber: true,
+                        role: true,
+                      },
+                    },
+                  },
+                },
+              },
+            });
+            const members = (group?.members || [])
+              .map((m: any) => m.user)
+              .filter(
+                (u: any) =>
+                  u && (u.role === "TENANT_ADMIN" || u.role === "AGENT")
+              );
+            const numbers: string[] = [];
+            const clients: string[] = [];
+            for (const u of members) {
+              if (!userIsAvailable(u)) continue;
+              const t = userTargets(u);
+              numbers.push(...t.numbers);
+              clients.push(...t.clients);
+            }
+            const sequential =
+              String(config?.ringStrategy || "")
+                .trim()
+                .toUpperCase() === "SEQUENTIAL";
+            if (!numbers.length && !clients.length) return null;
+            return { numbers, clients, sequential };
+          }
+
+          return null;
+        }
+
+        // Call Group
+        if (nodeLabel === "Call Group") {
+          const callGroupId = String(config?.callGroupId || "").trim();
+          if (!callGroupId) return null;
+
+          const group = await (prisma as any).callGroup.findFirst({
+            where: { id: callGroupId, tenantId },
+            include: {
+              members: {
+                orderBy: { order: "asc" },
+                include: {
+                  user: {
+                    select: {
+                      id: true,
+                      isCheckedIn: true,
+                      agentTimeZone: true,
+                      workingHours: true,
+                      forwardingPhoneNumber: true,
+                      phoneNumber: true,
+                      role: true,
+                    },
+                  },
+                },
+              },
+            },
+          });
+
+          const members = (group?.members || [])
+            .map((m: any) => m.user)
+            .filter(
+              (u: any) => u && (u.role === "TENANT_ADMIN" || u.role === "AGENT")
+            );
+
+          const numbers: string[] = [];
+          const clients: string[] = [];
+          for (const u of members) {
+            if (!userIsAvailable(u)) continue;
+            const t = userTargets(u);
+            numbers.push(...t.numbers);
+            clients.push(...t.clients);
+          }
+
+          const sequential =
+            String(config?.ringStrategy || "")
+              .trim()
+              .toUpperCase() === "SEQUENTIAL";
+
+          if (!numbers.length && !clients.length) return null;
+          return { numbers, clients, sequential };
+        }
+
+        return null;
+      };
+
+    const resolveAssignedAgentFallback =
+      async (): Promise<ResolvedTargets | null> => {
+        const assignedAgent = session.workflowContext?.workflow?.assignedAgent;
+        const assignedAgentId = String(assignedAgent?.id || "").trim();
+        if (!assignedAgentId) return null;
+
+        const user = await prisma.user.findFirst({
+          where: {
+            id: assignedAgentId,
+            tenantId,
+            role: { in: ["TENANT_ADMIN", "AGENT"] },
+          },
+          select: {
+            id: true,
+            isCheckedIn: true,
+            agentTimeZone: true,
+            workingHours: true,
+            forwardingPhoneNumber: true,
+            phoneNumber: true,
+          } as any,
+        });
+        if (!user || !userIsAvailable(user)) return null;
+        return userTargets(user);
+      };
+
+    try {
+      // Precedence:
+      // 1) Workflow-configured transfer target (user/call group/external)
+      // 2) Workflow assigned agent (if configured and available)
+      // 3) If configured, voicemail fallback; else return to AI stream
+
+      const resolved =
+        (await resolveFromWorkflowConfig()) ||
+        (await resolveAssignedAgentFallback());
+      if (!resolved || (!resolved.numbers.length && !resolved.clients.length)) {
+        if (fallbackToVoicemail && phoneNumberId) {
+          const callbackBase = String(
+            process.env.TWILIO_WEBHOOK_URL || ""
+          ).trim();
+          const voicemailUrl = callbackBase.endsWith("/voice")
+            ? callbackBase.replace(/\/voice$/, "/voicemail")
+            : callbackBase.endsWith("/webhooks/twilio")
+            ? `${callbackBase}/voicemail`
+            : callbackBase
+            ? callbackBase.endsWith("/")
+              ? `${callbackBase}voicemail`
+              : `${callbackBase}/voicemail`
+            : "";
+
+          const actionAttr = voicemailUrl
+            ? ` action="${escapeXmlAttr(
+                voicemailUrl
+              )}?phoneNumberId=${escapeXmlAttr(phoneNumberId)}" method="POST"`
+            : "";
+
+          const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXmlText(
+    "Sorry, no agents are available right now. Please leave a message after the beep."
+  )}</Say>
+  <Record${actionAttr} maxLength="120" playBeep="true" />
+  <Say>Thank you. Goodbye.</Say>
+  <Hangup/>
+</Response>`;
+
+          await this.twilioService.updateCallTwiml(session.callSid, twiml);
+          // End the realtime session only after TwiML update succeeds.
+          await this.endSession(sessionId);
+          return;
+        }
+
+        console.warn(
+          `[TwilioRealtime] Human transfer requested but no available target (reason=${reason}).`
+        );
+        // Keep the realtime session alive if we didn't actually transfer.
+        session.transferInProgress = false;
+        return;
+      }
+
+      // Normalize dial targets just before emitting TwiML.
+      const dialNumbers = resolved.numbers
+        .map((n) => normalizeDialNumber(n))
+        .filter(Boolean);
+      const dialClients = resolved.clients.filter(Boolean);
+
+      if (!dialNumbers.length && !dialClients.length) {
+        console.warn(
+          `[TwilioRealtime] Human transfer requested but no dialable targets after normalization (reason=${reason}).`
+        );
+        session.transferInProgress = false;
+        return;
+      }
+
+      const actionUrl = deriveTransferDialActionUrl({
+        fallback: fallbackToVoicemail && phoneNumberId ? "voicemail" : "stream",
+        phoneNumberId: phoneNumberId || undefined,
+      });
+
+      const sequentialAttr = resolved.sequential ? ` sequential="true"` : "";
+      const ringToneEffective =
+        ringToneConfigured || (dialNumbers.length ? "us" : "");
+      const ringToneAttr = ringToneEffective
+        ? ` ringTone="${escapeXmlAttr(ringToneEffective)}"`
+        : "";
+      const actionAttr = actionUrl
+        ? ` action="${escapeXmlAttr(actionUrl)}" method="POST"`
+        : "";
+
+      const numbersXml = dialNumbers
+        .map((n) => `<Number>${escapeXmlText(n)}</Number>`)
+        .join("\n    ");
+      const clientsXml = dialClients
+        .map((c) => `<Client>${escapeXmlText(c)}</Client>`)
+        .join("\n    ");
+
+      console.log(
+        `[TwilioRealtime] Initiating human transfer for call ${session.callSid} (numbers=${dialNumbers.length}, clients=${dialClients.length}, reason=${reason})`
+      );
+      console.log(
+        `[TwilioRealtime] Transfer context (nodeLabel=${
+          nodeLabel || "(none)"
+        }, callerId=${callerIdForDial || "(none)"}, actionUrl=${
+          actionUrl || "(none)"
+        })`
+      );
+      console.log(
+        `[TwilioRealtime] Dial targets: numbers=[${dialNumbers.join(
+          ", "
+        )}], clients=[${dialClients.join(", ")}]`
+      );
+
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXmlText(transferAnnouncement)}</Say>
+  <Dial${
+    callerIdForDial ? ` callerId="${escapeXmlAttr(callerIdForDial)}"` : ""
+  } timeout="${timeout}" answerOnBridge="true"${sequentialAttr}${ringToneAttr}${actionAttr}>
+    ${numbersXml}
+    ${clientsXml}
+  </Dial>
+</Response>`;
+
+      await this.twilioService.updateCallTwiml(session.callSid, twiml);
+
+      // End the realtime session once transfer TwiML is applied.
+      await this.endSession(sessionId);
+    } catch (error) {
+      console.error(
+        `[TwilioRealtime] Failed to initiate human transfer (call=${session.callSid}):`,
+        error
+      );
+      // Keep the realtime session alive if we could not apply transfer TwiML.
+      session.transferInProgress = false;
+    }
+  }
+
   async endSessionByCallSid(callSid: string): Promise<void> {
     for (const [sessionId, s] of this.sessions.entries()) {
       if (s.callSid === callSid) {
@@ -1754,8 +2303,81 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
             session.workflowContext.conversation =
               session.workflowContext.conversation || {};
             session.workflowContext.conversation.intent = detectedIntent;
+
+            console.log(
+              `[TwilioRealtime] Detected intent: ${detectedIntent || "(none)"}`
+            );
+
+            if (
+              detectedIntent === "request_human" &&
+              !session.transferInProgress &&
+              !session.transferRequested
+            ) {
+              console.log(
+                `[TwilioRealtime] Transfer requested by intent detection - requesting acknowledgment response`
+              );
+              session.transferRequested = true;
+              session.transferReason = "transcript_intent";
+
+              // Request AI to acknowledge the transfer
+              if (session.openaiWs && !session.responseInProgress) {
+                session.responseRequested = true;
+                session.openaiWs.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio", "text"],
+                      instructions:
+                        "Acknowledge that you will transfer the caller to an agent. Say something like 'Of course! Let me transfer you to an agent now.' Keep it brief.",
+                    },
+                  })
+                );
+              }
+            }
           } catch (e) {
             // Best-effort: do not interrupt call flow.
+            console.warn(`[TwilioRealtime] Intent detection error:`, e);
+          }
+
+          // Fallback: Direct keyword check for transfer requests (more aggressive)
+          if (!session.transferInProgress) {
+            const lowerTranscript = transcript.toLowerCase();
+            const transferKeywords = [
+              "transfer",
+              "agent",
+              "human",
+              "representative",
+              "speak to someone",
+              "talk to someone",
+              "person",
+              "operator",
+            ];
+            const hasTransferKeyword = transferKeywords.some((kw) =>
+              lowerTranscript.includes(kw)
+            );
+
+            if (hasTransferKeyword && !session.transferRequested) {
+              console.log(
+                `[TwilioRealtime] Transfer requested by keyword match in: "${transcript}" - requesting acknowledgment response`
+              );
+              session.transferRequested = true;
+              session.transferReason = "keyword_match";
+
+              // Request AI to acknowledge the transfer
+              if (session.openaiWs && !session.responseInProgress) {
+                session.responseRequested = true;
+                session.openaiWs.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio", "text"],
+                      instructions:
+                        "Acknowledge that you will transfer the caller to an agent. Say something like 'Of course! Let me transfer you to an agent now.' Keep it brief.",
+                    },
+                  })
+                );
+              }
+            }
           }
 
           // Auto-handle identity/email confirmations when we have a pending candidate.
@@ -1854,13 +2476,14 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
             break;
           }
           // Stream audio back to Twilio
-          if (message.delta && session.twilioWs) {
+          if (message.delta && session.twilioWs && session.streamSid) {
             session.twilioWs.send(
               JSON.stringify({
                 event: "media",
                 streamSid: session.streamSid,
                 media: {
                   payload: message.delta, // Base64 mulaw audio
+                  track: "outbound",
                 },
               })
             );
@@ -1895,6 +2518,25 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               session.pendingHangupReason = "agent_requested";
               session.hangupAfterThisResponse = true;
             }
+          }
+
+          // Execute transfer if requested after AI finishes speaking
+          if (session.transferRequested && !session.transferInProgress) {
+            console.log(
+              `[TwilioRealtime] AI response complete - waiting 2s for audio to finish before executing transfer (reason=${session.transferReason})`
+            );
+            const reason = session.transferReason || "user_request";
+            session.transferRequested = false;
+            session.transferReason = undefined;
+
+            // Wait 2 seconds to ensure the transfer acknowledgment audio finishes playing
+            setTimeout(() => {
+              console.log(
+                `[TwilioRealtime] Audio playback complete - executing transfer now (reason=${reason})`
+              );
+              void this.initiateHumanTransfer(sessionId, reason);
+            }, 2000);
+            return;
           }
 
           if (session.pendingHangupReason && session.hangupAfterThisResponse) {
@@ -2193,6 +2835,34 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       }
 
       if (functionName === "book_appointment") {
+        const currentIntent = String(
+          session.workflowContext?.conversation?.intent || ""
+        ).trim();
+
+        if (session.transferInProgress || currentIntent === "request_human") {
+          if (!session.transferInProgress) {
+            void this.initiateHumanTransfer(sessionId, "intent=request_human");
+          }
+
+          if (session.openaiWs) {
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({
+                    success: false,
+                    message:
+                      "Caller requested a human agent; booking is disabled. Transferring now.",
+                  }),
+                },
+              })
+            );
+          }
+          return;
+        }
+
         const result = await this.bookAppointment(session, {
           startTime: args.startTime,
           timeZone: args.timeZone,
@@ -2628,6 +3298,10 @@ Start by asking for the first item now.`;
     const session = this.sessions.get(sessionId);
     if (!session?.openaiWs) return;
 
+    const disableHangup = Boolean(
+      (session.workflowContext?.call as any)?.disableSilenceHangup
+    );
+
     // Clear any existing timeout
     if (session.silenceCheckTimeout) {
       clearTimeout(session.silenceCheckTimeout);
@@ -2649,10 +3323,26 @@ Start by asking for the first item now.`;
       const promptCount = currentSession.silencePromptCount || 0;
 
       if (promptCount >= 3) {
-        // After 3 prompts with no response, disconnect
+        // After 3 prompts with no response, disconnect (unless disabled)
         console.log(
           `[TwilioRealtime] No response after 3 prompts, disconnecting call ${sessionId}`
         );
+
+        if (disableHangup) {
+          currentSession.silencePromptCount = 0;
+          currentSession.responseRequested = true;
+          currentSession.openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions:
+                  "Say: 'Are you still there? I can help you try a different number, or I can send you to voicemail.'",
+              },
+            })
+          );
+          return;
+        }
 
         currentSession.responseRequested = true;
         currentSession.openaiWs.send(

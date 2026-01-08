@@ -36,6 +36,70 @@ type WorkflowEdge = {
   label?: string;
 };
 
+function conditionChecksRequestHuman(node: WorkflowNode): boolean {
+  const condition = node?.config?.condition;
+  if (!condition || typeof condition !== "object") return false;
+
+  const matchesSimple = (c: any): boolean => {
+    const left = String(c?.simple?.leftOperand?.value || "").trim();
+    const op = String(c?.simple?.operator || "").trim();
+    const right = String(c?.simple?.rightOperand?.value || "").trim();
+    return (
+      left === "conversation.intent" &&
+      (op === "equals" || op === "==") &&
+      right === "request_human"
+    );
+  };
+
+  if (condition.evaluationType === "simple") {
+    return matchesSimple(condition);
+  }
+
+  if (condition.evaluationType === "compound") {
+    const list = Array.isArray(condition?.compound?.conditions)
+      ? condition.compound.conditions
+      : [];
+    return list.some((c: any) => {
+      if (c?.evaluationType === "simple") return matchesSimple(c);
+      // best-effort: nested compound not expected, ignore
+      return false;
+    });
+  }
+
+  return false;
+}
+
+function findHumanTransferFromWorkflow(
+  workflow: any
+): { nodeLabel: string; config: any } | undefined {
+  const nodes: WorkflowNode[] = Array.isArray(workflow?.nodes)
+    ? workflow.nodes
+    : [];
+  const edges: WorkflowEdge[] = Array.isArray(workflow?.edges)
+    ? workflow.edges
+    : [];
+
+  const conditionNode = nodes.find(
+    (n) => n?.type === "condition" && conditionChecksRequestHuman(n)
+  );
+  if (!conditionNode) return undefined;
+
+  const yesEdge = edges.find(
+    (e) =>
+      e?.source === conditionNode.id &&
+      String(e?.label || "")
+        .trim()
+        .toLowerCase() === "yes"
+  );
+  if (!yesEdge) return undefined;
+
+  const target = nodes.find((n) => n?.id === yesEdge.target);
+  const label = String(target?.label || "").trim();
+  if (label !== "Call Forwarding" && label !== "Call Group") return undefined;
+
+  return { nodeLabel: label, config: target?.config || {} };
+}
+
 type DialTarget =
   | { type: "external"; number: string }
   | { type: "user"; userId: string; number: string; clientIdentity?: string }
@@ -69,8 +133,20 @@ function deriveTwilioDialActionUrl(
   return url.toString();
 }
 
+function toWsBaseUrl(raw: string): string {
+  const v = String(raw || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (!v) return "";
+  if (v.startsWith("wss://") || v.startsWith("ws://")) return v;
+  if (v.startsWith("https://")) return `wss://${v.slice("https://".length)}`;
+  if (v.startsWith("http://")) return `ws://${v.slice("http://".length)}`;
+  return `wss://${v.replace(/^\/+/, "")}`;
+}
+
 function buildTwilioStreamTwiml(publicUrl: string): string {
-  const streamUrl = `${publicUrl}/ws/twilio`;
+  const wsBase = toWsBaseUrl(publicUrl);
+  const streamUrl = wsBase ? `${wsBase}/ws/twilio` : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -106,6 +182,38 @@ function buildTwilioDialTwiml(options: {
     ${numbers}
     ${clients}
   </Dial>
+</Response>`;
+}
+
+function buildVoicemailTwiml(options: {
+  sayText: string;
+  phoneNumberId?: string;
+  req: Request;
+}): string {
+  const callbackUrl =
+    deriveVoicemailCallbackUrl() ||
+    `${options.req.protocol}://${options.req.get("host")}${
+      options.req.baseUrl
+    }/voicemail`;
+  const maxLength = 120;
+  const sayText =
+    normalizeTwilioSayText(options.sayText) ||
+    "Please leave a message after the beep.";
+  const phoneNumberId = String(options.phoneNumberId || "").trim();
+  const actionAttr = callbackUrl
+    ? phoneNumberId
+      ? ` action="${escapeXml(callbackUrl)}?phoneNumberId=${escapeXml(
+          phoneNumberId
+        )}" method="POST"`
+      : ` action="${escapeXml(callbackUrl)}" method="POST"`
+    : "";
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${escapeXml(sayText)}</Say>
+  <Record${actionAttr} maxLength="${maxLength}" playBeep="true" />
+  <Say>Thank you. Goodbye.</Say>
+  <Hangup/>
 </Response>`;
 }
 
@@ -662,8 +770,11 @@ router.post("/voice", async (req: Request, res: Response) => {
           select: {
             id: true,
             name: true,
+            isCheckedIn: true,
             agentTimeZone: true,
             workingHours: true,
+            forwardingPhoneNumber: true,
+            phoneNumber: true,
           },
         },
       } as any,
@@ -838,8 +949,11 @@ router.post("/voice", async (req: Request, res: Response) => {
                 select: {
                   id: true,
                   name: true,
+                  isCheckedIn: true,
                   agentTimeZone: true,
                   workingHours: true,
+                  forwardingPhoneNumber: true,
+                  phoneNumber: true,
                 },
               },
             } as any,
@@ -931,10 +1045,21 @@ router.post("/voice", async (req: Request, res: Response) => {
       );
     }
 
+    // Resolve configured intents for the call (workflow override if present, else tenant defaults).
+    let configuredIntents: unknown = (selectedWorkflow as any)?.aiConfig
+      ?.intents;
+    if (!Array.isArray(configuredIntents)) {
+      const tenantAi = await prisma.aiConfig.findUnique({
+        where: { tenantId: phoneNumber.tenantId },
+        select: { intents: true },
+      });
+      configuredIntents = tenantAi?.intents;
+    }
+
     // Resolve an initial intent for the call (updates later as transcripts arrive).
     const initialIntent = detectIntentFromConfiguredIntents(
       "",
-      (selectedWorkflow as any)?.aiConfig?.intents
+      configuredIntents
     );
 
     // Return TwiML to start Media Stream.
@@ -942,7 +1067,8 @@ router.post("/voice", async (req: Request, res: Response) => {
     // The greeting is spoken by OpenAI Realtime once the media stream is connected.
     const publicUrl =
       process.env.PUBLIC_URL || "wss://chamois-holy-unduly.ngrok-free.app";
-    const streamUrl = `${publicUrl}/ws/twilio`;
+    const wsBase = toWsBaseUrl(publicUrl);
+    const streamUrl = wsBase ? `${wsBase}/ws/twilio` : `${publicUrl}/ws/twilio`;
 
     console.log(
       `[Twilio] Starting OpenAI Realtime call ${CallSid}, Stream URL: ${streamUrl}`
@@ -1010,6 +1136,10 @@ router.post("/voice", async (req: Request, res: Response) => {
       },
     });
 
+    const humanTransfer = selectedWorkflow
+      ? findHumanTransferFromWorkflow(selectedWorkflow)
+      : undefined;
+
     // Build comprehensive context for workflow engine
     const workflowContext = {
       trigger: {
@@ -1049,6 +1179,7 @@ router.post("/voice", async (req: Request, res: Response) => {
         callerCity: CallerCity || undefined,
         callerState: CallerState || undefined,
         callerCountry: CallerCountry || undefined,
+        humanTransfer,
       },
       tenant: {
         id: phoneNumber.tenantId,
@@ -1063,15 +1194,19 @@ router.post("/voice", async (req: Request, res: Response) => {
           ? {
               id: (selectedWorkflow as any).assignedAgent.id,
               name: (selectedWorkflow as any).assignedAgent.name,
+              isCheckedIn: (selectedWorkflow as any).assignedAgent.isCheckedIn,
               agentTimeZone: (selectedWorkflow as any).assignedAgent
                 .agentTimeZone,
               workingHours: (selectedWorkflow as any).assignedAgent
                 .workingHours,
+              forwardingPhoneNumber: (selectedWorkflow as any).assignedAgent
+                .forwardingPhoneNumber,
+              phoneNumber: (selectedWorkflow as any).assignedAgent.phoneNumber,
             }
           : undefined,
       },
       ai: {
-        intents: (selectedWorkflow as any)?.aiConfig?.intents,
+        intents: configuredIntents,
       },
     };
 
@@ -1215,7 +1350,7 @@ router.post("/voice", async (req: Request, res: Response) => {
     }
 
     res.type("text/xml");
-    const twiml = buildTwilioStreamTwiml(publicUrl);
+    const twiml = buildTwilioStreamTwiml(wsBase || publicUrl);
     console.log(`[Twilio] Sending TwiML:`, twiml);
     res.send(twiml);
   } catch (error) {
@@ -1334,6 +1469,102 @@ router.post("/dial-action", async (req: Request, res: Response) => {
     res.send(buildTwilioStreamTwiml(publicUrl));
   } catch (error) {
     console.error("[Twilio] dial-action error:", error);
+    res.status(500).send("Internal server error");
+  }
+});
+
+/**
+ * Twilio <Dial> action callback for realtime transfers.
+ * Used by twilioRealtimeVoiceService when updating an in-flight call with <Dial>.
+ *
+ * Query params:
+ * - fallback: 'voicemail' | 'stream' (default: 'stream')
+ * - phoneNumberId: required for voicemail fallback
+ */
+router.post("/transfer-dial-action", async (req: Request, res: Response) => {
+  try {
+    const CallSid = String(req.body?.CallSid || "");
+    const DialCallStatus = String(req.body?.DialCallStatus || "").toLowerCase();
+    const fallback = String(req.query?.fallback || "stream").toLowerCase();
+    const phoneNumberId = String(req.query?.phoneNumberId || "").trim();
+
+    console.log("[Twilio] transfer-dial-action:", {
+      CallSid,
+      DialCallStatus,
+      fallback,
+      phoneNumberId: phoneNumberId || undefined,
+    });
+
+    // If call was answered and bridged, end the call when the bridge ends.
+    if (DialCallStatus === "completed") {
+      res.type("text/xml");
+      res.send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Hangup/></Response>`
+      );
+      return;
+    }
+
+    if (fallback === "voicemail" && phoneNumberId) {
+      res.type("text/xml");
+      res.send(
+        buildVoicemailTwiml({
+          sayText:
+            "Sorry, no agents are available right now. Please leave a message after the beep.",
+          phoneNumberId,
+          req,
+        })
+      );
+      return;
+    }
+
+    // If the transfer dial attempt failed and we're returning to AI,
+    // override the next greeting so the voice agent explains what happened.
+    if (
+      fallback === "stream" &&
+      CallSid &&
+      ["busy", "no-answer", "failed", "canceled"].includes(DialCallStatus)
+    ) {
+      const meta = (global as any).twilioCallMetadata?.[CallSid];
+      if (meta) {
+        const vmEnabled = Boolean(
+          meta?.workflowContext?.call?.humanTransfer?.config
+            ?.fallbackToVoicemail
+        );
+        meta.greeting = vmEnabled
+          ? "I'm sorry, I couldn't reach that number. Would you like to try a different number, or should I send you to voicemail?"
+          : "I'm sorry, I couldn't reach that number. Would you like to try a different number?";
+        meta.greetingSpokenByTwilio = false;
+        meta.workflowContext = meta.workflowContext || {};
+        meta.workflowContext.call = meta.workflowContext.call || {};
+        meta.workflowContext.call.lastTransferDialStatus = DialCallStatus;
+        meta.workflowContext.call.disableSilenceHangup = true;
+
+        console.log(
+          "[Twilio] transfer-dial-action: returning to stream with override greeting",
+          {
+            CallSid,
+            DialCallStatus,
+            disableSilenceHangup: true,
+          }
+        );
+      } else {
+        console.warn(
+          "[Twilio] transfer-dial-action: missing call metadata; cannot override greeting",
+          {
+            CallSid,
+            DialCallStatus,
+          }
+        );
+      }
+    }
+
+    // Default: return to AI stream.
+    const publicUrl =
+      process.env.PUBLIC_URL || "wss://chamois-holy-unduly.ngrok-free.app";
+    res.type("text/xml");
+    res.send(buildTwilioStreamTwiml(publicUrl));
+  } catch (error) {
+    console.error("[Twilio] transfer-dial-action error:", error);
     res.status(500).send("Internal server error");
   }
 });
@@ -1865,10 +2096,9 @@ export function initializeTwilioWebSocket(server: any) {
             if (sessionId) {
               await twilioRealtimeVoiceService.endSession(sessionId);
             }
-            // Cleanup metadata
-            if (callSid && (global as any).twilioCallMetadata) {
-              delete (global as any).twilioCallMetadata[callSid];
-            }
+            // Do NOT delete call metadata here.
+            // The call may return to AI after a transfer attempt (via a <Dial action> callback).
+            // Metadata is cleaned up on terminal call states in /status (or /voice when misrouted).
             break;
         }
       } catch (error) {

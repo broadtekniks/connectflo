@@ -238,6 +238,25 @@ export class TwilioService {
   }
 
   /**
+   * Update an active call by providing TwiML.
+   * This is useful for mid-call actions like transfers.
+   */
+  async updateCallTwiml(callSid: string, twiml: string) {
+    if (!twilioClient) throw new Error("Twilio credentials not configured");
+
+    const payload = String(twiml || "").trim();
+    if (!payload) throw new Error("Missing TwiML payload");
+
+    try {
+      await twilioClient.calls(callSid).update({ twiml: payload });
+      console.log(`[Twilio] Updated call ${callSid} with TwiML`);
+    } catch (error) {
+      console.error(`Failed to update TwiML for call ${callSid}:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Release/delete a phone number
    */
   async releaseNumber(numberSid: string) {

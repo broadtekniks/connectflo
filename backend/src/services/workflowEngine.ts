@@ -96,7 +96,12 @@ export class WorkflowEngine {
     }
 
     const hasDaysObject = (raw: any): raw is { days: Record<string, any> } =>
-      Boolean(raw && typeof raw === "object" && raw.days && typeof raw.days === "object");
+      Boolean(
+        raw &&
+          typeof raw === "object" &&
+          raw.days &&
+          typeof raw.days === "object"
+      );
 
     const weekdayShort = start.toFormat("ccc").toLowerCase();
     const weekdayLong = (start.weekdayLong || "").toLowerCase();
@@ -124,7 +129,11 @@ export class WorkflowEngine {
       return false;
     }
 
-    const workStart = start.set({ hour: startHour, minute: startMin, second: 0 });
+    const workStart = start.set({
+      hour: startHour,
+      minute: startMin,
+      second: 0,
+    });
     let workEnd = start.set({ hour: endHour, minute: endMin, second: 0 });
 
     // Handle overnight shifts (e.g., 22:00 -> 06:00)
@@ -183,7 +192,6 @@ export class WorkflowEngine {
           name: true,
           agentTimeZone: true,
           workingHours: true,
-          businessHours: true,
         },
       },
       phoneNumbers: {
@@ -941,8 +949,10 @@ export class WorkflowEngine {
             },
           });
 
-          const workflowHours = (context.resources as any)?.workflow?.businessHours;
-          const workflowTz = (context.resources as any)?.workflow?.businessTimeZone;
+          const workflowHours = (context.resources as any)?.workflow
+            ?.businessHours;
+          const workflowTz = (context.resources as any)?.workflow
+            ?.businessTimeZone;
 
           const hasDaysObject = (raw: any): boolean => {
             if (!raw || typeof raw !== "object") return false;
@@ -1161,7 +1171,11 @@ export class WorkflowEngine {
             const msg =
               "HubSpot is not connected for this tenant (or connection is not active).";
             console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
-            variableResolver.set("variables.workflow.hubspotError", msg, context);
+            variableResolver.set(
+              "variables.workflow.hubspotError",
+              msg,
+              context
+            );
             (context as any).hubspot = (context as any).hubspot || {};
             (context as any).hubspot.error = msg;
             break;
@@ -1195,11 +1209,20 @@ export class WorkflowEngine {
 
           if (action === "search") {
             if (objectType === "contact") {
-              const email = String(config?.email || context.customer?.email || "").trim();
-              const phone = String(config?.phone || context.customer?.phone || "").trim();
+              const email = String(
+                config?.email || context.customer?.email || ""
+              ).trim();
+              const phone = String(
+                config?.phone || context.customer?.phone || ""
+              ).trim();
               const firstName = String(config?.firstName || "").trim();
               const lastName = String(config?.lastName || "").trim();
-              const name = String([firstName, lastName].filter(Boolean).join(" ") || config?.name || context.customer?.name || "").trim();
+              const name = String(
+                [firstName, lastName].filter(Boolean).join(" ") ||
+                  config?.name ||
+                  context.customer?.name ||
+                  ""
+              ).trim();
 
               const results = await provider.searchContacts({
                 ...(email ? { email } : {}),
@@ -1215,7 +1238,9 @@ export class WorkflowEngine {
                 context
               );
             } else if (objectType === "company") {
-              const name = String(config?.companyName || config?.company || "").trim();
+              const name = String(
+                config?.companyName || config?.company || ""
+              ).trim();
               const domain = String(config?.domain || "").trim();
               const results = await provider.searchCompanies({
                 ...(name ? { name } : {}),
@@ -1232,11 +1257,17 @@ export class WorkflowEngine {
             } else if (objectType === "deal") {
               const stage = String(config?.stage || "").trim();
               const contactId =
-                String(config?.contactId || (context as any)?.hubspot?.contact?.id || "").trim() ||
-                undefined;
+                String(
+                  config?.contactId ||
+                    (context as any)?.hubspot?.contact?.id ||
+                    ""
+                ).trim() || undefined;
               const companyId =
-                String(config?.companyId || (context as any)?.hubspot?.company?.id || "").trim() ||
-                undefined;
+                String(
+                  config?.companyId ||
+                    (context as any)?.hubspot?.company?.id ||
+                    ""
+                ).trim() || undefined;
               const results = await provider.searchDeals({
                 ...(contactId ? { contactId } : {}),
                 ...(companyId ? { companyId } : {}),
@@ -1252,7 +1283,9 @@ export class WorkflowEngine {
             }
           } else if (action === "create") {
             if (objectType === "contact") {
-              const email = String(config?.email || context.customer?.email || "").trim();
+              const email = String(
+                config?.email || context.customer?.email || ""
+              ).trim();
               const contact = await provider.createContact({
                 ...(email ? { email } : {}),
                 ...(String(config?.firstName || "").trim()
@@ -1261,8 +1294,14 @@ export class WorkflowEngine {
                 ...(String(config?.lastName || "").trim()
                   ? { lastName: String(config.lastName).trim() }
                   : {}),
-                ...(String(config?.phone || context.customer?.phone || "").trim()
-                  ? { phone: String(config.phone || context.customer?.phone).trim() }
+                ...(String(
+                  config?.phone || context.customer?.phone || ""
+                ).trim()
+                  ? {
+                      phone: String(
+                        config.phone || context.customer?.phone
+                      ).trim(),
+                    }
                   : {}),
                 ...(String(config?.company || "").trim()
                   ? { company: String(config.company).trim() }
@@ -1275,7 +1314,9 @@ export class WorkflowEngine {
                 context
               );
             } else if (objectType === "company") {
-              const name = String(config?.companyName || config?.company || "").trim();
+              const name = String(
+                config?.companyName || config?.company || ""
+              ).trim();
               const domain = String(config?.domain || "").trim() || undefined;
               const phone = String(config?.phone || "").trim() || undefined;
               const company = await provider.createCompany({
@@ -1294,10 +1335,13 @@ export class WorkflowEngine {
               const amountRaw = String(config?.amount || "").trim();
               const amount = amountRaw ? Number(amountRaw) : undefined;
               const stage = String(config?.stage || "").trim() || undefined;
-              const closeDate = String(config?.closeDate || "").trim() || undefined;
+              const closeDate =
+                String(config?.closeDate || "").trim() || undefined;
               const deal = await provider.createDeal({
                 name,
-                ...(typeof amount === "number" && !Number.isNaN(amount) ? { amount } : {}),
+                ...(typeof amount === "number" && !Number.isNaN(amount)
+                  ? { amount }
+                  : {}),
                 ...(stage ? { stage } : {}),
                 ...(closeDate ? { closeDate } : {}),
               } as any);
@@ -1313,7 +1357,11 @@ export class WorkflowEngine {
             if (!recordId) {
               const msg = "HubSpot Get by ID requires a recordId.";
               console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
-              variableResolver.set("variables.workflow.hubspotError", msg, context);
+              variableResolver.set(
+                "variables.workflow.hubspotError",
+                msg,
+                context
+              );
               break;
             }
 
@@ -1332,34 +1380,62 @@ export class WorkflowEngine {
             if (!recordId) {
               const msg = "HubSpot Update requires a recordId.";
               console.warn(`[WorkflowEngine] ${node.label}: ${msg}`);
-              variableResolver.set("variables.workflow.hubspotError", msg, context);
+              variableResolver.set(
+                "variables.workflow.hubspotError",
+                msg,
+                context
+              );
               break;
             }
 
             if (objectType === "contact") {
               const contact = await provider.updateContact(recordId, {
-                ...(String(config?.email || "").trim() ? { email: String(config.email).trim() } : {}),
-                ...(String(config?.firstName || "").trim() ? { firstName: String(config.firstName).trim() } : {}),
-                ...(String(config?.lastName || "").trim() ? { lastName: String(config.lastName).trim() } : {}),
-                ...(String(config?.phone || "").trim() ? { phone: String(config.phone).trim() } : {}),
-                ...(String(config?.company || "").trim() ? { company: String(config.company).trim() } : {}),
+                ...(String(config?.email || "").trim()
+                  ? { email: String(config.email).trim() }
+                  : {}),
+                ...(String(config?.firstName || "").trim()
+                  ? { firstName: String(config.firstName).trim() }
+                  : {}),
+                ...(String(config?.lastName || "").trim()
+                  ? { lastName: String(config.lastName).trim() }
+                  : {}),
+                ...(String(config?.phone || "").trim()
+                  ? { phone: String(config.phone).trim() }
+                  : {}),
+                ...(String(config?.company || "").trim()
+                  ? { company: String(config.company).trim() }
+                  : {}),
               });
               (context as any).hubspot.contact = contact;
             } else if (objectType === "company") {
               const company = await provider.updateCompany(recordId, {
-                ...(String(config?.companyName || "").trim() ? { name: String(config.companyName).trim() } : {}),
-                ...(String(config?.domain || "").trim() ? { domain: String(config.domain).trim() } : {}),
-                ...(String(config?.phone || "").trim() ? { phone: String(config.phone).trim() } : {}),
+                ...(String(config?.companyName || "").trim()
+                  ? { name: String(config.companyName).trim() }
+                  : {}),
+                ...(String(config?.domain || "").trim()
+                  ? { domain: String(config.domain).trim() }
+                  : {}),
+                ...(String(config?.phone || "").trim()
+                  ? { phone: String(config.phone).trim() }
+                  : {}),
               } as any);
               (context as any).hubspot.company = company;
             } else if (objectType === "deal") {
               const amountRaw = String(config?.amount || "").trim();
               const amount = amountRaw ? Number(amountRaw) : undefined;
               const deal = await provider.updateDeal(recordId, {
-                ...(String(config?.dealName || "").trim() ? { name: String(config.dealName).trim() } : {}),
-                ...(typeof amount === "number" && !Number.isNaN(amount) ? { amount } : {}),
-                ...(String(config?.stage || "").trim() ? { stage: String(config.stage).trim() } : {}),
-                ...(String(config?.closeDate || "").trim() ? { closeDate: String(config.closeDate).trim() } : {}),
+                ...(String(config?.dealName || "").trim()
+                  ? { name: String(config.dealName).trim() }
+                  : {}),
+                ...(typeof amount === "number" && !Number.isNaN(amount)
+                  ? { amount }
+                  : {}),
+                ...(String(config?.stage || "").trim()
+                  ? { stage: String(config.stage).trim() }
+                  : {}),
+                ...(String(config?.closeDate || "").trim()
+                  ? { closeDate: String(config.closeDate).trim() }
+                  : {}),
               } as any);
               (context as any).hubspot.deal = deal;
             }
@@ -1367,21 +1443,24 @@ export class WorkflowEngine {
             const activityType = String(config?.activityType || "note")
               .trim()
               .toLowerCase();
-            const associatedRecordId = String(config?.associatedRecordId || "").trim();
+            const associatedRecordId = String(
+              config?.associatedRecordId || ""
+            ).trim();
             const notes = String(config?.activityNotes || "").trim();
-            const duration = config?.callDuration ? Number(config.callDuration) : undefined;
+            const duration = config?.callDuration
+              ? Number(config.callDuration)
+              : undefined;
 
             const activity = await provider.logActivity({
               type: (activityType as any) || "note",
-              subject: String(config?.activitySubject || "").trim() || undefined,
+              subject:
+                String(config?.activitySubject || "").trim() || undefined,
               notes: notes || undefined,
               timestamp: new Date().toISOString(),
               ...(typeof duration === "number" && !Number.isNaN(duration)
                 ? { duration }
                 : {}),
-              ...(associatedRecordId
-                ? { contactId: associatedRecordId }
-                : {}),
+              ...(associatedRecordId ? { contactId: associatedRecordId } : {}),
             } as any);
 
             (context as any).hubspot.lastActivity = activity;
