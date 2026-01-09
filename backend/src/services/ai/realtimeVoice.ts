@@ -11,6 +11,13 @@ interface RealtimeSession {
   context: string;
 }
 
+type FunctionCallDoneMessage = {
+  type: "response.function_call_arguments.done";
+  call_id: string;
+  name: string;
+  arguments: string;
+};
+
 export class RealtimeVoiceService extends EventEmitter {
   private sessions: Map<string, RealtimeSession> = new Map();
   private apiKey: string;
@@ -71,27 +78,26 @@ export class RealtimeVoiceService extends EventEmitter {
       const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
         this.realtimeModel
       )}`;
-      const ws = new WebSocket(
-        realtimeUrl,
-        {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "OpenAI-Beta": "realtime=v1",
-          },
-        }
-      );
+      const ws = new WebSocket(realtimeUrl, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "OpenAI-Beta": "realtime=v1",
+        },
+      });
 
       ws.on("open", () => {
         console.log(`[Realtime] OpenAI WebSocket connected for ${sessionId}`);
+
+        const instructions =
+          systemPrompt ||
+          "You are a helpful AI assistant for ConnectFlo customer support. Keep responses brief and natural.";
 
         // Send session configuration
         const sessionConfig = {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions:
-              systemPrompt ||
-              "You are a helpful AI assistant for ConnectFlo customer support. Keep responses brief and natural.",
+            instructions: `${instructions}\n\nCALL CONTROL TOOLS (IMPORTANT):\n- If the caller asks for a human/agent/representative, call request_human_transfer (do not rely on keyword heuristics).\n- If the caller wants to end the call now, call end_call (then give a very short goodbye).\n\nKNOWLEDGE BASE TOOL:\n- If you need company-specific information, call search_knowledge_base with a focused query, then use the returned results to answer.`,
             voice: "alloy", // Options: alloy, echo, shimmer
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
@@ -106,6 +112,60 @@ export class RealtimeVoiceService extends EventEmitter {
             },
             temperature: 0.8,
             max_response_output_tokens: 4096,
+            tools: [
+              {
+                type: "function",
+                name: "search_knowledge_base",
+                description:
+                  "Search the company knowledge base for relevant information to answer customer questions.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    query: {
+                      type: "string",
+                      description:
+                        "The search query to find relevant information",
+                    },
+                  },
+                  required: ["query"],
+                },
+              },
+              {
+                type: "function",
+                name: "request_human_transfer",
+                description:
+                  "Request transferring the caller to a human agent. Use when the caller asks to speak with a human/agent/representative.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: {
+                      type: "string",
+                      description:
+                        "Optional short reason/context for the transfer request.",
+                    },
+                  },
+                  required: [],
+                },
+              },
+              {
+                type: "function",
+                name: "end_call",
+                description:
+                  "End the call. Use when the caller explicitly wants to end the call.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: {
+                      type: "string",
+                      description:
+                        "Optional short reason for ending the call (e.g., caller_requested).",
+                    },
+                  },
+                  required: [],
+                },
+              },
+            ],
+            tool_choice: "auto",
           },
         };
         console.log(
@@ -156,6 +216,27 @@ export class RealtimeVoiceService extends EventEmitter {
           console.log(`[Realtime] Session configured: ${sessionId}`);
           this.emit("session_ready", { sessionId });
           break;
+
+        case "response.function_call_arguments.done": {
+          const call = message as FunctionCallDoneMessage;
+          let parsedArgs: any = {};
+          try {
+            parsedArgs = call.arguments ? JSON.parse(call.arguments) : {};
+          } catch (e) {
+            console.warn(
+              `[Realtime] Failed to parse function call args for ${call.name}:`,
+              e
+            );
+          }
+
+          this.emit("function_call", {
+            sessionId,
+            callId: call.call_id,
+            functionName: call.name,
+            args: parsedArgs,
+          });
+          break;
+        }
 
         case "response.audio.delta":
           // Stream audio chunks back to Telnyx
@@ -303,6 +384,40 @@ export class RealtimeVoiceService extends EventEmitter {
                 required: ["query"],
               },
             },
+            {
+              type: "function",
+              name: "request_human_transfer",
+              description:
+                "Request transferring the caller to a human agent. Use when the caller asks to speak with a human/agent/representative.",
+              parameters: {
+                type: "object",
+                properties: {
+                  reason: {
+                    type: "string",
+                    description:
+                      "Optional short reason/context for the transfer request.",
+                  },
+                },
+                required: [],
+              },
+            },
+            {
+              type: "function",
+              name: "end_call",
+              description:
+                "End the call. Use when the caller explicitly wants to end the call.",
+              parameters: {
+                type: "object",
+                properties: {
+                  reason: {
+                    type: "string",
+                    description:
+                      "Optional short reason for ending the call (e.g., caller_requested).",
+                  },
+                },
+                required: [],
+              },
+            },
           ],
           tool_choice: "auto",
         },
@@ -324,6 +439,7 @@ export class RealtimeVoiceService extends EventEmitter {
     // Emit event for external handling (e.g., KB search)
     this.emit("function_call", {
       sessionId,
+      callId: undefined,
       functionName,
       args,
     });

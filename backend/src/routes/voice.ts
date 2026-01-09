@@ -4,8 +4,10 @@ import { IncomingMessage } from "http";
 import { realtimeVoiceService } from "../services/ai/realtimeVoice";
 import { AudioStreamManager } from "../services/audioStreamManager";
 import { KnowledgeBaseService } from "../services/knowledgeBase";
+import { TelnyxService } from "../services/telnyx";
 
 const knowledgeBaseService = new KnowledgeBaseService();
+const telnyxService = new TelnyxService();
 
 /**
  * Voice Streaming Route
@@ -206,6 +208,47 @@ function setupRealtimeEventHandlers(sessionId: string) {
   // Handle function calls for RAG
   realtimeVoiceService.on("function_call", async (data) => {
     if (data.sessionId !== sessionId) return;
+
+    if (data.functionName === "end_call") {
+      // Acknowledge the tool call, then hang up the Telnyx call.
+      try {
+        if (data.callId) {
+          await realtimeVoiceService.sendFunctionResult(
+            sessionId,
+            data.callId,
+            {
+              success: true,
+              message: "Ending call",
+            }
+          );
+        }
+      } catch (e) {
+        console.error("[VoiceWS] Failed to send end_call tool result:", e);
+      }
+
+      try {
+        await telnyxService.hangupCall(session.callControlId);
+      } finally {
+        try {
+          session.telnyxWs?.close();
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+
+    if (data.functionName === "request_human_transfer") {
+      // Telnyx transfer isn't implemented in this WS bridge today.
+      if (data.callId) {
+        await realtimeVoiceService.sendFunctionResult(sessionId, data.callId, {
+          success: false,
+          message:
+            "Human transfer is not supported on the Telnyx streaming bridge yet.",
+        });
+      }
+      return;
+    }
 
     if (data.functionName === "search_knowledge_base") {
       console.log(`[VoiceWS] KB search: ${data.args.query}`);

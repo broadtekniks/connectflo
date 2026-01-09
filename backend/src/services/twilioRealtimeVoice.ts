@@ -2252,7 +2252,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.\n\nIDENTITY CHECK RULES:\n- If our records show a caller name, ask: "Are you <name>?" and wait for yes/no.\n- If the caller confirms, call update_customer_info with that same name to mark it verified.\n- If we do NOT have a name on file, always ask for their full name and save it.\n\nAPPOINTMENT BOOKING RULES:\n- Before calling book_appointment, ALWAYS confirm: date, time, and email address.\n- Do NOT ask the caller for their time zone. Use the workflow/tenant business time zone. Only capture a time zone if the caller explicitly provides one.\n- ALWAYS read back the email address slowly and ask the caller to confirm yes/no.\n- If the caller spells their email using patterns like "S for Sugar" or phonetics like "Tango", use normalize_email_spelling to reconstruct the email; then read it back and confirm.\n- Only call book_appointment AFTER email confirmation. Include emailConfirmed=true.\n- By default, require a Google Calendar event (requireCalendarEvent=true). If Google Calendar isn't available, ask if email-only is acceptable and only then set requireCalendarEvent=false.\n- If the caller says "tomorrow at 10", ask clarifying questions if date/time zone are ambiguous (do not ask for a time zone unless they brought it up).\n- Booking must respect the connected Google Calendar schedule; if busy, offer alternatives.\n\nIf the caller asks to book/schedule an appointment or call, follow the rules above and then use the book_appointment function to create the appointment and send a confirmation email (with an .ics invite).`,
+            instructions: `${session.systemPrompt}\n\n${VOICE_CALL_RUNTIME_INSTRUCTIONS}\n\nWhen you learn the caller's name, email, phone number, order number, or reason for calling, use the update_customer_info function to save it.\n\nCALL CONTROL TOOLS (IMPORTANT):\n- If the caller asks for a human/agent/representative, call request_human_transfer (do not rely on keyword heuristics).\n- If you asked the caller to confirm their name or callback number and they answer yes/no, you MUST call confirm_callback_name or confirm_callback_number with confirmed=true/false before proceeding.\n- If you asked the caller to confirm an email address and they answer yes/no, you MUST call confirm_email with confirmed=true/false before proceeding.\n- If the caller wants to end the call now, call end_call (then give a very short goodbye).\n\nIDENTITY CHECK RULES:\n- If our records show a caller name, ask: "Are you <name>?" and wait for yes/no.\n- If the caller confirms, call update_customer_info with that same name to mark it verified.\n- If we do NOT have a name on file, always ask for their full name and save it.\n\nAPPOINTMENT BOOKING RULES:\n- Before calling book_appointment, ALWAYS confirm: date, time, and email address.\n- Do NOT ask the caller for their time zone. Use the workflow/tenant business time zone. Only capture a time zone if the caller explicitly provides one.\n- ALWAYS read back the email address slowly and ask the caller to confirm yes/no.\n- If the caller spells their email using patterns like "S for Sugar" or phonetics like "Tango", use normalize_email_spelling to reconstruct the email; then read it back and confirm.\n- Only call book_appointment AFTER email confirmation. Include emailConfirmed=true.\n- By default, require a Google Calendar event (requireCalendarEvent=true). If Google Calendar isn't available, ask if email-only is acceptable and only then set requireCalendarEvent=false.\n- If the caller says "tomorrow at 10", ask clarifying questions if date/time zone are ambiguous (do not ask for a time zone unless they brought it up).\n- Booking must respect the connected Google Calendar schedule; if busy, offer alternatives.\n\nIf the caller asks to book/schedule an appointment or call, follow the rules above and then use the book_appointment function to create the appointment and send a confirmation email (with an .ics invite).`,
             voice: voice, // Options: alloy, echo, shimmer
             input_audio_format: "g711_ulaw", // Twilio uses mulaw
             output_audio_format: "g711_ulaw",
@@ -2270,6 +2270,91 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
             },
             temperature: 0.8,
             tools: [
+              {
+                type: "function",
+                name: "request_human_transfer",
+                description:
+                  "Request transferring the caller to a human agent. Use when the caller asks to speak with a human/agent/representative.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: {
+                      type: "string",
+                      description:
+                        "Optional short reason/context for the transfer request.",
+                    },
+                  },
+                  required: [],
+                },
+              },
+              {
+                type: "function",
+                name: "end_call",
+                description:
+                  "End the call. Use when the caller explicitly wants to end the call, or after completing a callback intake flow.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: {
+                      type: "string",
+                      description:
+                        "Optional short reason for ending the call (e.g., caller_requested, callback_completed).",
+                    },
+                  },
+                  required: [],
+                },
+              },
+              {
+                type: "function",
+                name: "confirm_callback_name",
+                description:
+                  "Record whether the caller confirmed the name you read back during callback intake.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    confirmed: {
+                      type: "boolean",
+                      description:
+                        "True if the caller confirmed the name is correct; false otherwise.",
+                    },
+                  },
+                  required: ["confirmed"],
+                },
+              },
+              {
+                type: "function",
+                name: "confirm_callback_number",
+                description:
+                  "Record whether the caller confirmed the callback phone number you read back during callback intake.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    confirmed: {
+                      type: "boolean",
+                      description:
+                        "True if the caller confirmed the callback number is correct; false otherwise.",
+                    },
+                  },
+                  required: ["confirmed"],
+                },
+              },
+              {
+                type: "function",
+                name: "confirm_email",
+                description:
+                  "Record whether the caller confirmed an email address you read back.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    confirmed: {
+                      type: "boolean",
+                      description:
+                        "True if the caller confirmed the email address is correct; false otherwise.",
+                    },
+                  },
+                  required: ["confirmed"],
+                },
+              },
               {
                 type: "function",
                 name: "update_customer_info",
@@ -2467,209 +2552,12 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         if (transcript) {
           console.log(`[TwilioRealtime] User transcript: ${transcript}`);
 
-          const callbackMode = Boolean(
-            session.workflowContext?.callbackRequested
-          );
-
-          // Update detected intent (keyword matching against tenant-configured intents).
-          try {
-            const rawIntents = session.workflowContext?.ai?.intents;
-            const detectedIntent = detectIntentFromConfiguredIntents(
-              transcript,
-              rawIntents
-            );
-            session.workflowContext = session.workflowContext || {};
-            session.workflowContext.conversation =
-              session.workflowContext.conversation || {};
-            session.workflowContext.conversation.intent = detectedIntent;
-
-            console.log(
-              `[TwilioRealtime] Detected intent: ${detectedIntent || "(none)"}`
-            );
-
-            if (
-              detectedIntent === "request_human" &&
-              !session.transferInProgress &&
-              !session.transferRequested
-            ) {
-              if (callbackMode) {
-                // In callback-request mode, do not attempt another transfer.
-                session.transferRequested = false;
-                session.transferReason = undefined;
-              } else {
-                console.log(
-                  `[TwilioRealtime] Transfer requested by intent detection - will execute after current response`
-                );
-                session.transferRequested = true;
-                session.transferReason = "transcript_intent";
-                // Don't send acknowledgment here - the keyword check below will handle it
-              }
-            }
-          } catch (e) {
-            // Best-effort: do not interrupt call flow.
-            console.warn(`[TwilioRealtime] Intent detection error:`, e);
-          }
-
-          // Fallback: Direct keyword check for transfer requests (more aggressive)
-          if (!session.transferInProgress && !callbackMode) {
-            const lowerTranscript = transcript.toLowerCase();
-            const transferKeywords = [
-              "transfer",
-              "agent",
-              "human",
-              "representative",
-              "speak to someone",
-              "talk to someone",
-              "person",
-              "operator",
-            ];
-            const hasTransferKeyword = transferKeywords.some((kw) =>
-              lowerTranscript.includes(kw)
-            );
-
-            if (hasTransferKeyword && !session.transferRequested) {
-              console.log(
-                `[TwilioRealtime] Transfer requested by keyword match in: "${transcript}" - requesting acknowledgment response`
-              );
-              session.transferRequested = true;
-              session.transferReason = "keyword_match";
-
-              // Request AI to acknowledge the transfer
-              if (session.openaiWs && !session.responseInProgress) {
-                session.responseRequested = true;
-                session.openaiWs.send(
-                  JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["audio", "text"],
-                      instructions:
-                        "Acknowledge that you will transfer the caller to an agent. Say something like 'Of course! Let me transfer you to an agent now.' Keep it brief.",
-                    },
-                  })
-                );
-              }
-            }
-          }
-
-          // Auto-handle identity/email confirmations when we have a pending candidate.
-          if (session.workflowContext?.pendingIdentityName) {
-            if (transcriptIsAffirmative(transcript)) {
-              session.workflowContext.identityVerified = true;
-              session.workflowContext.customer =
-                session.workflowContext.customer || {};
-              session.workflowContext.customer.name =
-                session.workflowContext.pendingIdentityName;
-              if (session.workflowContext?.callbackRequested) {
-                session.workflowContext.callbackNameConfirmed = true;
-              }
-              session.workflowContext.infoCollected =
-                session.workflowContext.infoCollected || [];
-              if (!session.workflowContext.infoCollected.includes("name")) {
-                session.workflowContext.infoCollected.push("name");
-              }
-              delete session.workflowContext.pendingIdentityName;
-              console.log(
-                `[TwilioRealtime] Identity confirmed for ${session.workflowContext.customer.name}`
-              );
-
-              if (
-                session.workflowContext?.callbackRequested &&
-                session.openaiWs &&
-                !session.responseInProgress
-              ) {
-                this.promptForNextItem(sessionId, []);
-              }
-            } else if (transcriptIsNegative(transcript)) {
-              delete session.workflowContext.pendingIdentityName;
-            }
-          }
-
-          // Auto-handle callback phone confirmations when we have a pending candidate.
-          if (session.workflowContext?.pendingCallbackNumberCandidate) {
-            const pending = String(
-              session.workflowContext.pendingCallbackNumberCandidate
-            ).trim();
-
-            if (transcriptIsAffirmative(transcript)) {
-              session.workflowContext.customer =
-                session.workflowContext.customer || {};
-              session.workflowContext.customer.phone = pending;
-              session.workflowContext.callbackNumberConfirmed = true;
-              session.workflowContext.infoCollected =
-                session.workflowContext.infoCollected || [];
-              if (!session.workflowContext.infoCollected.includes("phone")) {
-                session.workflowContext.infoCollected.push("phone");
-              }
-              delete session.workflowContext.pendingCallbackNumberCandidate;
-              console.log(
-                `[TwilioRealtime] Callback number confirmed: ${session.workflowContext.customer.phone}`
-              );
-
-              if (session.openaiWs && !session.responseInProgress) {
-                this.promptForNextItem(sessionId, []);
-              }
-            } else if (transcriptIsNegative(transcript)) {
-              delete session.workflowContext.pendingCallbackNumberCandidate;
-              session.workflowContext.callbackNumberConfirmed = false;
-
-              if (session.openaiWs && !session.responseInProgress) {
-                session.responseRequested = true;
-                session.openaiWs.send(
-                  JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["audio", "text"],
-                      instructions:
-                        "Okay. What is the best callback phone number to reach you? Please say the number slowly. After they provide it, use update_customer_info with phone.",
-                    },
-                  })
-                );
-              }
-            }
-          }
-
-          if (session.workflowContext?.pendingEmailCandidate) {
-            if (transcriptIsAffirmative(transcript)) {
-              session.workflowContext.customer =
-                session.workflowContext.customer || {};
-              session.workflowContext.customer.email =
-                session.workflowContext.pendingEmailCandidate;
-              session.workflowContext.emailConfirmed = true;
-              session.workflowContext.infoCollected =
-                session.workflowContext.infoCollected || [];
-              if (!session.workflowContext.infoCollected.includes("email")) {
-                session.workflowContext.infoCollected.push("email");
-              }
-              delete session.workflowContext.pendingEmailCandidate;
-              console.log(
-                `[TwilioRealtime] Email confirmed: ${session.workflowContext.customer.email}`
-              );
-            } else if (transcriptIsNegative(transcript)) {
-              session.workflowContext.emailConfirmed = false;
-              delete session.workflowContext.pendingEmailCandidate;
-            }
-          }
-
-          if (this.userWantsToEndCall(transcript)) {
-            session.pendingHangupReason = "caller_requested";
-            session.hangupAfterThisResponse = true;
-
-            // Ask the assistant to say a brief goodbye; then we will hang up
-            // after the response finishes (see response.done handler).
-            if (session.openaiWs && !session.responseInProgress) {
-              session.responseRequested = true;
-              session.openaiWs.send(
-                JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio", "text"],
-                    instructions:
-                      "The caller wants to end the call. Thank them, say a brief goodbye, and confirm you are ending the call now.",
-                  },
-                })
-              );
-            }
-          }
+          // Keep the transcript for debugging/observability only.
+          // Call-control is handled via explicit tool calls (request_human_transfer/end_call/etc.).
+          session.workflowContext = session.workflowContext || {};
+          session.workflowContext.conversation =
+            session.workflowContext.conversation || {};
+          session.workflowContext.conversation.lastTranscript = transcript;
         }
       }
 
@@ -2930,6 +2818,284 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         `[TwilioRealtime] Function ${functionName} called with:`,
         args
       );
+
+      if (functionName === "request_human_transfer") {
+        const callbackMode = Boolean(session.workflowContext?.callbackRequested);
+        const reason = String(args?.reason || "").trim();
+
+        if (callbackMode) {
+          // In callback-request mode, do not attempt another transfer.
+          session.transferRequested = false;
+          session.transferReason = undefined;
+          if (session.openaiWs) {
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({
+                    success: false,
+                    message:
+                      "Transfer is not allowed while collecting a callback request.",
+                  }),
+                },
+              })
+            );
+          }
+          return;
+        }
+
+        // No-op if already transferring.
+        if (session.transferInProgress || session.transferRequested) {
+          if (session.openaiWs) {
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({
+                    success: true,
+                    message: "Transfer already in progress or queued.",
+                  }),
+                },
+              })
+            );
+          }
+          return;
+        }
+
+        session.transferRequested = true;
+        session.transferReason = reason ? `tool:${reason}` : "tool:request_human_transfer";
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify({
+                  success: true,
+                  message: "Transfer requested. Acknowledge briefly; transfer will start after your response.",
+                }),
+              },
+            })
+          );
+
+          session.responseRequested = true;
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions:
+                  "Acknowledge you are transferring the caller to an agent now. Keep it brief.",
+              },
+            })
+          );
+        }
+        return;
+      }
+
+      if (functionName === "end_call") {
+        const reason = String(args?.reason || "tool_end_call").trim() || "tool_end_call";
+        session.pendingHangupReason = reason;
+        session.hangupAfterThisResponse = true;
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify({ success: true, message: "Ending call" }),
+              },
+            })
+          );
+
+          session.responseRequested = true;
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions:
+                  "Reply with a very short goodbye and confirm you are ending the call now.",
+              },
+            })
+          );
+        }
+        return;
+      }
+
+      if (functionName === "confirm_callback_name") {
+        const confirmed = Boolean(args?.confirmed);
+        session.workflowContext = session.workflowContext || {};
+
+        if (confirmed) {
+          const pendingName = String(
+            session.workflowContext?.pendingIdentityName || ""
+          ).trim();
+          if (pendingName) {
+            session.workflowContext.customer = session.workflowContext.customer || {};
+            session.workflowContext.customer.name = pendingName;
+          }
+          session.workflowContext.identityVerified = true;
+          session.workflowContext.callbackNameConfirmed = true;
+          session.workflowContext.infoCollected =
+            session.workflowContext.infoCollected || [];
+          if (!session.workflowContext.infoCollected.includes("name")) {
+            session.workflowContext.infoCollected.push("name");
+          }
+          delete session.workflowContext.pendingIdentityName;
+        } else {
+          session.workflowContext.identityVerified = false;
+          session.workflowContext.callbackNameConfirmed = false;
+          delete session.workflowContext.pendingIdentityName;
+        }
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify({ success: true, confirmed }),
+              },
+            })
+          );
+
+          if (confirmed) {
+            this.promptForNextItem(sessionId, []);
+          } else {
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions:
+                    "Okay. What is your full name? After they provide it, use update_customer_info with name.",
+                },
+              })
+            );
+          }
+        }
+        return;
+      }
+
+      if (functionName === "confirm_callback_number") {
+        const confirmed = Boolean(args?.confirmed);
+        session.workflowContext = session.workflowContext || {};
+
+        if (confirmed) {
+          const pendingNumber = String(
+            session.workflowContext?.pendingCallbackNumberCandidate || ""
+          ).trim();
+          if (pendingNumber) {
+            session.workflowContext.customer = session.workflowContext.customer || {};
+            session.workflowContext.customer.phone = pendingNumber;
+          }
+          session.workflowContext.callbackNumberConfirmed = true;
+          session.workflowContext.infoCollected =
+            session.workflowContext.infoCollected || [];
+          if (!session.workflowContext.infoCollected.includes("phone")) {
+            session.workflowContext.infoCollected.push("phone");
+          }
+          delete session.workflowContext.pendingCallbackNumberCandidate;
+        } else {
+          session.workflowContext.callbackNumberConfirmed = false;
+          delete session.workflowContext.pendingCallbackNumberCandidate;
+        }
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify({ success: true, confirmed }),
+              },
+            })
+          );
+
+          if (confirmed) {
+            this.promptForNextItem(sessionId, []);
+          } else {
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions:
+                    "Okay. What is the best callback phone number to reach you? Please say the number slowly. After they provide it, use update_customer_info with phone.",
+                },
+              })
+            );
+          }
+        }
+        return;
+      }
+
+      if (functionName === "confirm_email") {
+        const confirmed = Boolean(args?.confirmed);
+        session.workflowContext = session.workflowContext || {};
+
+        if (confirmed) {
+          const pendingEmail = String(
+            session.workflowContext?.pendingEmailCandidate || ""
+          ).trim();
+          if (pendingEmail) {
+            session.workflowContext.customer = session.workflowContext.customer || {};
+            session.workflowContext.customer.email = pendingEmail;
+          }
+          session.workflowContext.emailConfirmed = true;
+          session.workflowContext.infoCollected =
+            session.workflowContext.infoCollected || [];
+          if (!session.workflowContext.infoCollected.includes("email")) {
+            session.workflowContext.infoCollected.push("email");
+          }
+          delete session.workflowContext.pendingEmailCandidate;
+        } else {
+          session.workflowContext.emailConfirmed = false;
+          delete session.workflowContext.pendingEmailCandidate;
+        }
+
+        if (session.openaiWs) {
+          session.openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callId,
+                output: JSON.stringify({ success: true, confirmed }),
+              },
+            })
+          );
+
+          if (!confirmed) {
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions:
+                    "Okay. Please spell your email address again slowly. You can say it as letters and words (like 'S as in Sam'), including 'at' and 'dot'. Then use normalize_email_spelling.",
+                },
+              })
+            );
+          }
+        }
+
+        return;
+      }
 
       if (functionName === "update_customer_info") {
         // Update workflow context with collected information
