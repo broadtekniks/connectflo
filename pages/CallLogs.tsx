@@ -250,149 +250,107 @@ const CallLogs: React.FC = () => {
             {callLogs.map((call) => (
               <div
                 key={call.id}
-                className="bg-white rounded-xl shadow-sm border border-slate-200 hover:shadow-lg hover:border-indigo-200 transition-all duration-200"
+                className="bg-white rounded-lg shadow-sm border border-slate-200 hover:shadow-md hover:border-indigo-200 transition-all duration-200"
               >
-                <div className="p-6">
-                  {/* Header Row */}
-                  <div className="flex items-start justify-between gap-4 mb-5">
-                    <div className="flex items-center gap-4">
-                      {/* Direction Icon */}
-                      <div
-                        className={`p-3 rounded-xl ${
-                          call.direction === "inbound"
-                            ? "bg-green-100"
-                            : "bg-blue-100"
+                <div className="px-4 py-3">
+                  {/* Single compact row with all info */}
+                  <div className="flex items-center gap-3">
+                    {/* Direction Icon - smaller */}
+                    <div
+                      className={`p-2 rounded-lg flex-shrink-0 ${
+                        call.direction === "inbound"
+                          ? "bg-green-100"
+                          : "bg-blue-100"
+                      }`}
+                    >
+                      {call.direction === "inbound" ? (
+                        <PhoneIncoming className="text-green-600" size={16} />
+                      ) : (
+                        <PhoneOutgoing className="text-blue-600" size={16} />
+                      )}
+                    </div>
+
+                    {/* Customer Name/From */}
+                    <div className="min-w-[180px]">
+                      <div className="font-semibold text-slate-900 text-sm truncate">
+                        {call.customer?.name || call.from}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {call.direction === "inbound" ? "From" : "To"}:{" "}
+                        {call.direction === "inbound" ? call.from : call.to}
+                      </div>
+                    </div>
+
+                    {/* Status badges */}
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <span
+                        className={`px-2 py-0.5 text-[10px] font-semibold rounded uppercase ${
+                          call.status === "completed"
+                            ? "bg-emerald-100 text-emerald-700"
+                            : call.status === "no-answer"
+                            ? "bg-amber-100 text-amber-700"
+                            : call.status === "busy"
+                            ? "bg-red-100 text-red-700"
+                            : "bg-slate-100 text-slate-700"
                         }`}
                       >
-                        {call.direction === "inbound" ? (
-                          <PhoneIncoming className="text-green-600" size={24} />
-                        ) : (
-                          <PhoneOutgoing className="text-blue-600" size={24} />
-                        )}
-                      </div>
-
-                      {/* Customer Info */}
-                      <div>
-                        <h3 className="text-xl font-bold text-slate-900 mb-1">
-                          {call.customer?.name || call.from}
-                        </h3>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`px-3 py-1 text-xs font-semibold rounded-full uppercase tracking-wide ${
-                              call.status === "completed"
-                                ? "bg-emerald-100 text-emerald-700"
-                                : call.status === "no-answer"
-                                ? "bg-amber-100 text-amber-700"
-                                : call.status === "busy"
-                                ? "bg-red-100 text-red-700"
-                                : "bg-slate-100 text-slate-700"
-                            }`}
-                          >
-                            {call.status}
-                          </span>
-                          {call.recordingUrl && (
-                            <span className="px-3 py-1 text-xs font-semibold rounded-full bg-indigo-100 text-indigo-700 uppercase tracking-wide">
-                              Voicemail
-                            </span>
-                          )}
-                          {call.sentiment && (
-                            <span
-                              className={`px-3 py-1 text-xs font-semibold rounded-full ${getSentimentColor(
-                                call.sentiment
-                              )}`}
-                            >
-                              {call.sentiment}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                        {call.status}
+                      </span>
+                      {call.recordingUrl && (
+                        <span className="px-2 py-0.5 text-[10px] font-semibold rounded bg-indigo-100 text-indigo-700 uppercase">
+                          Voicemail
+                        </span>
+                      )}
+                      {call.sentiment && (
+                        <span
+                          className={`px-2 py-0.5 text-[10px] font-semibold rounded uppercase ${getSentimentColor(
+                            call.sentiment
+                          )}`}
+                        >
+                          {call.sentiment}
+                        </span>
+                      )}
                     </div>
 
-                    {/* Customer Avatar */}
+                    {/* Duration - compact */}
+                    {call.durationSeconds !== null && (
+                      <div className="flex items-center gap-1 text-xs text-slate-600 flex-shrink-0">
+                        <Clock size={12} className="text-slate-400" />
+                        {formatDuration(call.durationSeconds)}
+                      </div>
+                    )}
+
+                    {/* Date & Time - compact */}
+                    <div className="flex items-center gap-1 text-xs text-slate-600 flex-shrink-0 ml-auto">
+                      <Clock size={12} className="text-slate-400" />
+                      {formatDate(call.createdAt)}
+                    </div>
+
+                    {/* Avatar - smaller */}
                     {call.customer && (
                       <div className="flex-shrink-0">
-                        <div className="w-14 h-14 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
-                          <User size={28} className="text-white" />
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                          <User size={16} className="text-white" />
                         </div>
                       </div>
                     )}
                   </div>
 
-                  {/* Call Details Grid */}
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5 p-4 bg-slate-50 rounded-xl">
-                    <div>
-                      <div className="text-xs font-medium text-slate-500 mb-1 uppercase tracking-wide">
-                        From
-                      </div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                        <Phone size={14} className="text-indigo-600" />
-                        {call.from}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-medium text-slate-500 mb-1 uppercase tracking-wide">
-                        To
-                      </div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                        <Phone size={14} className="text-indigo-600" />
-                        {call.to}
-                      </div>
-                    </div>
-                    {call.durationSeconds !== null && (
-                      <div>
-                        <div className="text-xs font-medium text-slate-500 mb-1 uppercase tracking-wide">
-                          Duration
-                        </div>
-                        <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                          <Clock size={14} className="text-indigo-600" />
-                          {formatDuration(call.durationSeconds)}
-                        </div>
-                      </div>
-                    )}
-                    <div>
-                      <div className="text-xs font-medium text-slate-500 mb-1 uppercase tracking-wide">
-                        Date & Time
-                      </div>
-                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                        <Clock size={14} className="text-indigo-600" />
-                        {formatDate(call.createdAt)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Outcome */}
-                  {call.outcome && (
-                    <div className="mb-5 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500 rounded-lg">
-                      <div className="flex items-start gap-3">
-                        <div className="p-2 bg-blue-100 rounded-lg">
-                          <FileText size={16} className="text-blue-600" />
-                        </div>
-                        <div>
-                          <div className="text-xs font-semibold text-blue-900 mb-1 uppercase tracking-wide">
-                            Call Outcome
-                          </div>
-                          <p className="text-sm font-medium text-blue-800">
-                            {call.outcome}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Transcript Summary */}
-                  {call.transcriptSummary && (
-                    <div className="mb-5 p-4 bg-slate-50 border border-slate-200 rounded-xl">
-                      <div className="flex items-center gap-2 mb-3">
-                        <div className="p-2 bg-slate-200 rounded-lg">
-                          <FileText size={16} className="text-slate-700" />
-                        </div>
-                        <span className="text-sm font-bold text-slate-900 uppercase tracking-wide">
-                          Transcript Summary
+                  {/* Optional second line for outcome/transcript - only if present */}
+                  {(call.outcome || call.transcriptSummary) && (
+                    <div className="mt-2 pl-9 text-xs text-slate-600 truncate">
+                      {call.outcome && (
+                        <span className="font-medium">
+                          Outcome:{" "}
+                          <span className="text-blue-700">{call.outcome}</span>
                         </span>
-                      </div>
-                      <p className="text-sm text-slate-700 leading-relaxed">
-                        {call.transcriptSummary}
-                      </p>
+                      )}
+                      {call.outcome && call.transcriptSummary && (
+                        <span className="mx-2">•</span>
+                      )}
+                      {call.transcriptSummary && (
+                        <span className="italic">{call.transcriptSummary}</span>
+                      )}
                     </div>
                   )}
                 </div>

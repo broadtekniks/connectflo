@@ -22,6 +22,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res) => {
         email: ext.email,
         extension: ext.extension,
         label: ext.extensionLabel,
+        forwardingNumber: (ext as any).extensionForwardingNumber,
         status: ext.webPhoneStatus,
         lastSeen: ext.webPhoneLastSeen,
       })),
@@ -41,7 +42,7 @@ router.get("/", authenticateToken, async (req: AuthRequest, res) => {
  */
 router.post("/assign", authenticateToken, async (req: AuthRequest, res) => {
   try {
-    const { userId, extension, label } = req.body;
+    const { userId, extension, label, forwardingNumber } = req.body;
     const tenantId = req.user!.tenantId;
 
     // Validate required fields
@@ -70,7 +71,8 @@ router.post("/assign", authenticateToken, async (req: AuthRequest, res) => {
       userId,
       tenantId,
       extension,
-      label
+      label,
+      forwardingNumber
     );
 
     res.json({

@@ -156,7 +156,7 @@ const TeamMembers: React.FC = () => {
             email: m.email,
             role: m.role === "TENANT_ADMIN" ? "Admin" : "Agent",
             status:
-              m.role === "AGENT"
+              m.role === "AGENT" || m.role === "TENANT_ADMIN"
                 ? m.isCheckedIn
                   ? "Checked in"
                   : "Checked out"

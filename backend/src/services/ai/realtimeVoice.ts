@@ -14,10 +14,13 @@ interface RealtimeSession {
 export class RealtimeVoiceService extends EventEmitter {
   private sessions: Map<string, RealtimeSession> = new Map();
   private apiKey: string;
+  private realtimeModel: string;
 
   constructor() {
     super();
     this.apiKey = process.env.OPENAI_API_KEY || "";
+    this.realtimeModel =
+      process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
   }
 
   /**
@@ -65,8 +68,11 @@ export class RealtimeVoiceService extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       // OpenAI Realtime API WebSocket endpoint
+      const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
+        this.realtimeModel
+      )}`;
       const ws = new WebSocket(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17",
+        realtimeUrl,
         {
           headers: {
             Authorization: `Bearer ${this.apiKey}`,

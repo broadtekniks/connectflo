@@ -53,6 +53,9 @@ const ChatArea: React.FC<ChatAreaProps> = ({
     {}
   );
 
+  // Check if this is a callback request (notification-only, no reply interface)
+  const isCallbackRequest = conversation.tags?.includes("callback-requested");
+
   const isVoicemailMessage = (msg: Message) => {
     return (
       conversation.channel === ChannelType.VOICE &&
@@ -530,92 +533,117 @@ const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
           )}
 
-          {/* Input Area */}
-          <div className="p-4 bg-white border-t border-slate-200">
-            <div className="flex gap-4 mb-2">
-              <button
-                onClick={() => setIsPrivate(false)}
-                className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
-                  !isPrivate
-                    ? "border-indigo-600 text-indigo-600"
-                    : "border-transparent text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Reply
-              </button>
-              <button
-                onClick={() => setIsPrivate(true)}
-                className={`flex items-center gap-1 text-sm font-medium pb-2 border-b-2 transition-colors ${
-                  isPrivate
-                    ? "border-amber-500 text-amber-600"
-                    : "border-transparent text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                <Lock size={12} /> Private Note
-              </button>
-            </div>
-            <div
-              className={`relative rounded-xl border transition-all focus-within:ring-2 focus-within:ring-offset-1 ${
-                isPrivate
-                  ? "bg-amber-50 border-amber-200 focus-within:ring-amber-400"
-                  : "bg-white border-slate-300 focus-within:ring-indigo-500"
-              }`}
-            >
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={
-                  isPrivate
-                    ? "Write a private note only visible to your team..."
-                    : "Write a reply..."
-                }
-                className={`w-full p-3 bg-transparent resize-none outline-none min-h-[80px] text-sm ${
-                  isPrivate
-                    ? "placeholder-amber-400/70"
-                    : "placeholder-slate-400"
-                }`}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-              />
-              <div className="flex items-center justify-between px-2 pb-2">
-                <div className="flex items-center gap-1">
-                  <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
-                    <Smile size={18} />
-                  </button>
-                  <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
-                    <Paperclip size={18} />
-                  </button>
-                  <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
-                    <FileText size={18} />
-                  </button>
+          {/* Input Area - Hide for callback requests, show action banner instead */}
+          {isCallbackRequest ? (
+            <div className="p-6 bg-gradient-to-r from-indigo-50 to-purple-50 border-t border-indigo-200">
+              <div className="flex items-center gap-4">
+                <div className="p-3 bg-indigo-100 rounded-full text-indigo-600">
+                  <PhoneOff size={24} />
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleGenerateAi}
-                    disabled={isGenerating}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-md transition-colors disabled:opacity-50"
-                  >
-                    <Sparkles size={14} />
-                    {isGenerating ? "Thinking..." : "AI Assist"}
-                  </button>
-                  <button
-                    onClick={handleSend}
-                    className={`p-2 rounded-md text-white shadow-sm transition-colors ${
-                      isPrivate
-                        ? "bg-amber-500 hover:bg-amber-600"
-                        : "bg-indigo-600 hover:bg-indigo-700"
-                    }`}
-                  >
-                    <Send size={18} />
-                  </button>
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-indigo-900 mb-1">
+                    Callback Required
+                  </h3>
+                  <p className="text-sm text-indigo-700">
+                    This customer requested a callback. Please call them at the
+                    number provided above.
+                  </p>
+                </div>
+                <button
+                  onClick={() => onArchive(conversation.id)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-sm"
+                >
+                  Mark as Contacted
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-4 bg-white border-t border-slate-200">
+              <div className="flex gap-4 mb-2">
+                <button
+                  onClick={() => setIsPrivate(false)}
+                  className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
+                    !isPrivate
+                      ? "border-indigo-600 text-indigo-600"
+                      : "border-transparent text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  Reply
+                </button>
+                <button
+                  onClick={() => setIsPrivate(true)}
+                  className={`flex items-center gap-1 text-sm font-medium pb-2 border-b-2 transition-colors ${
+                    isPrivate
+                      ? "border-amber-500 text-amber-600"
+                      : "border-transparent text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  <Lock size={12} /> Private Note
+                </button>
+              </div>
+              <div
+                className={`relative rounded-xl border transition-all focus-within:ring-2 focus-within:ring-offset-1 ${
+                  isPrivate
+                    ? "bg-amber-50 border-amber-200 focus-within:ring-amber-400"
+                    : "bg-white border-slate-300 focus-within:ring-indigo-500"
+                }`}
+              >
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={
+                    isPrivate
+                      ? "Write a private note only visible to your team..."
+                      : "Write a reply..."
+                  }
+                  className={`w-full p-3 bg-transparent resize-none outline-none min-h-[80px] text-sm ${
+                    isPrivate
+                      ? "placeholder-amber-400/70"
+                      : "placeholder-slate-400"
+                  }`}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                />
+                <div className="flex items-center justify-between px-2 pb-2">
+                  <div className="flex items-center gap-1">
+                    <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
+                      <Smile size={18} />
+                    </button>
+                    <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
+                      <Paperclip size={18} />
+                    </button>
+                    <button className="p-2 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100">
+                      <FileText size={18} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleGenerateAi}
+                      disabled={isGenerating}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-md transition-colors disabled:opacity-50"
+                    >
+                      <Sparkles size={14} />
+                      {isGenerating ? "Thinking..." : "AI Assist"}
+                    </button>
+                    <button
+                      onClick={handleSend}
+                      className={`p-2 rounded-md text-white shadow-sm transition-colors ${
+                        isPrivate
+                          ? "bg-amber-500 hover:bg-amber-600"
+                          : "bg-indigo-600 hover:bg-indigo-700"
+                      }`}
+                    >
+                      <Send size={18} />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
         </>
       )}
     </div>

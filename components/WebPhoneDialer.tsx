@@ -552,7 +552,7 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load user's extension number
+  // Load user's extension number and listen for check-in events
   useEffect(() => {
     const loadExtension = async () => {
       try {
@@ -602,7 +602,29 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
     };
 
     loadExtension();
-  }, []);
+
+    // Auto-connect web phone when agent checks in (without opening UI)
+    const handleCheckIn = () => {
+      if (!enabled && featureEnabled) {
+        enable(false); // Connect in background without opening UI
+      }
+    };
+
+    // Auto-disconnect web phone when agent checks out
+    const handleCheckOut = () => {
+      if (enabled) {
+        disable();
+      }
+    };
+
+    window.addEventListener("agent-checked-in", handleCheckIn);
+    window.addEventListener("agent-checked-out", handleCheckOut);
+
+    return () => {
+      window.removeEventListener("agent-checked-in", handleCheckIn);
+      window.removeEventListener("agent-checked-out", handleCheckOut);
+    };
+  }, [enabled, featureEnabled]);
 
   const setSocketReady = (ready: boolean) => {
     try {
@@ -651,7 +673,7 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
     setMuted(false);
   };
 
-  const enable = async () => {
+  const enable = async (openUI: boolean = true) => {
     // Check if user is authenticated
     const authToken = localStorage.getItem("token");
     if (!authToken) {
@@ -718,6 +740,14 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
           if (id) upsertRecent({ id, status: "missed" });
           activeRecentIdRef.current = null;
           activeCallStartAtRef.current = null;
+          activeCallRef.current = null;
+          // Clear incoming call state
+          setIncomingFrom(null);
+          setMuted(false);
+          setStatus(enabledRef.current ? "Ready" : "Off");
+          updatePresence(enabledRef.current ? "ONLINE" : "OFFLINE");
+          // Close the incoming modal UI when caller cancels
+          setIsOpen(false);
         });
 
         call.on?.("accept", () => {
@@ -774,7 +804,9 @@ const WebPhoneDialer: React.FC<{ featureEnabled: boolean }> = ({
 
       deviceRef.current = device;
       setEnabled(true);
-      setIsOpen(true);
+      if (openUI) {
+        setIsOpen(true);
+      }
     } catch (e) {
       cleanupDevice();
       setEnabled(false);

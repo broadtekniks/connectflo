@@ -7,6 +7,7 @@ interface ExtensionUser {
   email: string;
   extension: string;
   extensionLabel: string | null;
+  extensionForwardingNumber?: string | null;
   webPhoneStatus: WebPhoneStatus;
   webPhoneLastSeen: Date | null;
 }
@@ -31,6 +32,7 @@ export class ExtensionDirectory {
         email: true,
         extension: true,
         extensionLabel: true,
+        extensionForwardingNumber: true,
         webPhoneStatus: true,
         webPhoneLastSeen: true,
       },
@@ -55,6 +57,7 @@ export class ExtensionDirectory {
         email: true,
         extension: true,
         extensionLabel: true,
+        extensionForwardingNumber: true,
         webPhoneStatus: true,
         webPhoneLastSeen: true,
       },
@@ -71,7 +74,8 @@ export class ExtensionDirectory {
     userId: string,
     tenantId: string,
     extension: string,
-    label?: string
+    label?: string,
+    forwardingNumber?: string
   ): Promise<void> {
     // Validate extension format (3-4 digits)
     if (!/^\d{3,4}$/.test(extension)) {
@@ -97,6 +101,7 @@ export class ExtensionDirectory {
       data: {
         extension,
         extensionLabel: label || null,
+        extensionForwardingNumber: forwardingNumber || null,
         extensionEnabled: true,
       },
     });

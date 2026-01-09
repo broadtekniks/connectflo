@@ -51,6 +51,24 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [agentBusy, setAgentBusy] = useState<boolean>(false);
   const [telephonyOpen, setTelephonyOpen] = useState<boolean>(true);
   const [voicemailUnreadCount, setVoicemailUnreadCount] = useState<number>(0);
+  const [currentHash, setCurrentHash] = useState<string>("");
+
+  // Listen for hash changes to update active state in telephony submenu
+  useEffect(() => {
+    const updateHash = () => {
+      setCurrentHash(window.location.hash.slice(1));
+    };
+
+    // Set initial hash
+    updateHash();
+
+    // Listen for hash changes
+    window.addEventListener("hashchange", updateHash);
+
+    return () => {
+      window.removeEventListener("hashchange", updateHash);
+    };
+  }, []);
 
   useEffect(() => {
     if (userRole !== "AGENT") return;
@@ -100,6 +118,13 @@ const Sidebar: React.FC<SidebarProps> = ({
         ? await api.agents.checkOut()
         : await api.agents.checkIn();
       setAgentCheckedIn(Boolean(next.isCheckedIn));
+
+      // Auto-connect web phone when checking in, auto-disconnect when checking out
+      if (next.isCheckedIn) {
+        window.dispatchEvent(new CustomEvent("agent-checked-in"));
+      } else {
+        window.dispatchEvent(new CustomEvent("agent-checked-out"));
+      }
     } catch (err) {
       console.error("Failed to toggle agent check-in", err);
     } finally {
@@ -243,6 +268,16 @@ const Sidebar: React.FC<SidebarProps> = ({
         window.location.hash = "extensions";
       },
     },
+    {
+      id: "settings:call-groups",
+      label: "Call Groups",
+      icon: Users,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN"],
+      onClick: () => {
+        onNavigate("settings");
+        window.location.hash = "call-groups";
+      },
+    },
   ];
 
   const filteredTelephonyItems = telephonyItems.filter((item) =>
@@ -338,36 +373,46 @@ const Sidebar: React.FC<SidebarProps> = ({
 
             {telephonyOpen && !isCollapsed && (
               <div className="mt-1 space-y-1">
-                {filteredTelephonyItems.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => {
-                      if (item.onClick) return item.onClick();
-                      onNavigate(item.id);
-                    }}
-                    className={`w-full flex items-center justify-between px-3 py-2 transition-colors duration-200 rounded-md ml-3 ${
-                      currentView === item.id ||
-                      (item.id.startsWith("settings:") &&
-                        currentView === "settings")
-                        ? "bg-slate-800 text-white"
-                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                    }`}
-                  >
-                    <span className="flex items-center">
-                      <item.icon size={18} className="shrink-0" />
-                      <span className="ml-3 font-medium text-sm">
-                        {item.label}
+                {filteredTelephonyItems.map((item) => {
+                  // For settings: items, check the URL hash to determine active state
+                  const isActive = (() => {
+                    if (item.id.startsWith("settings:")) {
+                      if (currentView !== "settings") return false;
+                      const expectedHash = item.id.split(":")[1]; // e.g., "web-phone", "extensions", "call-groups"
+                      return currentHash === expectedHash;
+                    }
+                    return currentView === item.id;
+                  })();
+
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        if (item.onClick) return item.onClick();
+                        onNavigate(item.id);
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 transition-colors duration-200 rounded-md ml-3 ${
+                        isActive
+                          ? "bg-slate-800 text-white"
+                          : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                      }`}
+                    >
+                      <span className="flex items-center">
+                        <item.icon size={18} className="shrink-0" />
+                        <span className="ml-3 font-medium text-sm">
+                          {item.label}
+                        </span>
                       </span>
-                    </span>
-                    {item.id === "voicemails" && voicemailUnreadCount > 0 && (
-                      <span className="min-w-5 h-5 px-1 rounded-full bg-indigo-600 text-white text-[10px] leading-5 text-center font-bold shrink-0">
-                        {voicemailUnreadCount > 99
-                          ? "99+"
-                          : String(voicemailUnreadCount)}
-                      </span>
-                    )}
-                  </button>
-                ))}
+                      {item.id === "voicemails" && voicemailUnreadCount > 0 && (
+                        <span className="min-w-5 h-5 px-1 rounded-full bg-indigo-600 text-white text-[10px] leading-5 text-center font-bold shrink-0">
+                          {voicemailUnreadCount > 99
+                            ? "99+"
+                            : String(voicemailUnreadCount)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

@@ -37,6 +37,7 @@ model User {
   extension             String?        @db.VarChar(10) // Extension number (e.g., "101", "5432")
   extensionEnabled      Boolean        @default(true) // Allow others to dial this extension
   extensionLabel        String?        @db.VarChar(100) // Display label for extension
+  extensionForwardingNumber String?    // External number to forward to if not picking up/offline
   webPhoneStatus        WebPhoneStatus @default(OFFLINE) // Web phone presence status
   webPhoneLastSeen      DateTime?      // Last time web phone was online
   createdAt             DateTime       @default(now())

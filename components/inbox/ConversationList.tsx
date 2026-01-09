@@ -158,8 +158,18 @@ const ConversationList: React.FC<ConversationListProps> = ({
 
       <div className="flex-1 overflow-y-auto">
         {filteredConversations.map((conv) => {
-          const lastMsg = conv.messages[conv.messages.length - 1];
+          const safeMessages = Array.isArray(conv.messages)
+            ? conv.messages.filter(Boolean)
+            : [];
+          const lastMsg = safeMessages[safeMessages.length - 1];
           const isSelected = conv.id === selectedId;
+          const lastSender = lastMsg?.sender;
+          const lastContent =
+            typeof lastMsg?.content === "string" && lastMsg.content.trim()
+              ? lastMsg.content
+              : "No messages yet";
+          const customerName = conv.customer?.name || "Unknown";
+          const customerAvatar = conv.customer?.avatar || "";
 
           return (
             <div
@@ -175,8 +185,8 @@ const ConversationList: React.FC<ConversationListProps> = ({
                 <div className="flex items-center gap-2">
                   <div className="w-8 h-8 rounded-full bg-slate-200 overflow-hidden shrink-0">
                     <img
-                      src={conv.customer.avatar}
-                      alt={conv.customer.name}
+                      src={customerAvatar}
+                      alt={customerName}
                       className="w-full h-full object-cover"
                     />
                   </div>
@@ -185,7 +195,7 @@ const ConversationList: React.FC<ConversationListProps> = ({
                       isSelected ? "text-indigo-900" : "text-slate-800"
                     }`}
                   >
-                    {conv.customer.name}
+                    {customerName}
                   </span>
                 </div>
                 <span className="text-xs text-slate-400 whitespace-nowrap">
@@ -209,7 +219,7 @@ const ConversationList: React.FC<ConversationListProps> = ({
               </div>
               <p
                 className={`text-sm line-clamp-2 ${
-                  lastMsg.sender === "CUSTOMER"
+                  lastSender === "CUSTOMER"
                     ? "font-medium text-slate-700"
                     : "text-slate-500"
                 }`}
@@ -217,7 +227,7 @@ const ConversationList: React.FC<ConversationListProps> = ({
                 {conv.subject ? (
                   <span className="font-bold">{conv.subject}: </span>
                 ) : null}
-                {lastMsg.content}
+                {lastContent}
               </p>
               <div className="flex gap-1 mt-2">
                 {conv.tags.map((tag) => (

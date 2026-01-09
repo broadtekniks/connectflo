@@ -2754,6 +2754,20 @@ const Workflows: React.FC = () => {
       )
         return;
 
+      // Cancel drag operation on Escape key
+      if (e.key === "Escape") {
+        // Check if there's an active drag operation
+        const dragElements = document.querySelectorAll('[draggable="true"]');
+        dragElements.forEach((el) => {
+          if (el instanceof HTMLElement) {
+            el.draggable = false;
+            setTimeout(() => {
+              el.draggable = true;
+            }, 0);
+          }
+        });
+      }
+
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedNodeId) {
           handleDeleteNode(selectedNodeId);
@@ -4667,6 +4681,42 @@ const Workflows: React.FC = () => {
                             />
                             <span>Respect working hours</span>
                           </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.includeExternalNumbers ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    includeExternalNumbers: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Include external phone numbers</span>
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.prioritizeWebPhone ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    prioritizeWebPhone: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Prioritize web phone over external numbers</span>
+                          </label>
                         </div>
 
                         <div className="pt-2 space-y-3">
@@ -4677,7 +4727,9 @@ const Workflows: React.FC = () => {
                             <textarea
                               rows={3}
                               placeholder="Please hold while I transfer you to an agent."
-                              value={selectedNode.config?.transferAnnouncement || ""}
+                              value={
+                                selectedNode.config?.transferAnnouncement || ""
+                              }
                               onChange={(e) =>
                                 updateNode(selectedNode.id, {
                                   config: {
@@ -4712,14 +4764,21 @@ const Workflows: React.FC = () => {
                               className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
                             />
                             <p className="text-[10px] text-slate-400 mt-1">
-                              Twilio ringback override (e.g. <span className="font-mono">us</span>, <span className="font-mono">uk</span>, <span className="font-mono">au</span>). Leave blank for default.
+                              Twilio ringback override (e.g.{" "}
+                              <span className="font-mono">us</span>,{" "}
+                              <span className="font-mono">uk</span>,{" "}
+                              <span className="font-mono">au</span>). Leave
+                              blank for default.
                             </p>
                           </div>
 
                           <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
                             <input
                               type="checkbox"
-                              checked={selectedNode.config?.fallbackToVoicemail ?? false}
+                              checked={
+                                selectedNode.config?.fallbackToVoicemail ??
+                                false
+                              }
                               onChange={(e) =>
                                 updateNode(selectedNode.id, {
                                   config: {
@@ -4810,33 +4869,91 @@ const Workflows: React.FC = () => {
                         )}
 
                         {selectedNode.config?.targetType === "user" && (
-                          <div>
-                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
-                              User
-                            </label>
-                            <select
-                              value={selectedNode.config?.userId || ""}
-                              onChange={(e) =>
-                                updateNode(selectedNode.id, {
-                                  config: {
-                                    ...selectedNode.config,
-                                    userId: e.target.value,
-                                  },
-                                })
-                              }
-                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
-                            >
-                              <option value="">Select a user</option>
-                              {availableAgents.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.name} ({u.email})
-                                </option>
-                              ))}
-                            </select>
-                            <p className="text-[10px] text-slate-400 mt-1">
-                              Uses the user's forwarding phone number.
-                            </p>
-                          </div>
+                          <>
+                            <div>
+                              <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                User
+                              </label>
+                              <select
+                                value={selectedNode.config?.userId || ""}
+                                onChange={(e) =>
+                                  updateNode(selectedNode.id, {
+                                    config: {
+                                      ...selectedNode.config,
+                                      userId: e.target.value,
+                                    },
+                                  })
+                                }
+                                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                              >
+                                <option value="">Select a user</option>
+                                {availableAgents.map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.name} ({u.email})
+                                  </option>
+                                ))}
+                              </select>
+                              <p className="text-[10px] text-slate-400 mt-1">
+                                Uses the user's forwarding phone number.
+                              </p>
+                            </div>
+
+                            <div className="space-y-3">
+                              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={
+                                    selectedNode.config
+                                      ?.enableFallbackExternal ?? false
+                                  }
+                                  onChange={(e) =>
+                                    updateNode(selectedNode.id, {
+                                      config: {
+                                        ...selectedNode.config,
+                                        enableFallbackExternal:
+                                          e.target.checked,
+                                      },
+                                    })
+                                  }
+                                  className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                                />
+                                <span>
+                                  Forward to external number if user unavailable
+                                </span>
+                              </label>
+
+                              {selectedNode.config?.enableFallbackExternal && (
+                                <div>
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">
+                                    Fallback External Number (Optional)
+                                  </label>
+                                  <input
+                                    type="tel"
+                                    placeholder="Defaults to user's extension forwarding number"
+                                    value={
+                                      selectedNode.config
+                                        ?.fallbackExternalNumber || ""
+                                    }
+                                    onChange={(e) =>
+                                      updateNode(selectedNode.id, {
+                                        config: {
+                                          ...selectedNode.config,
+                                          fallbackExternalNumber:
+                                            e.target.value,
+                                        },
+                                      })
+                                    }
+                                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                                  />
+                                  <p className="text-[10px] text-slate-400 mt-1">
+                                    Leave empty to use the user's extension
+                                    forwarding number. Provide a custom number
+                                    to override.
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </>
                         )}
 
                         {selectedNode.config?.targetType === "callGroup" && (
@@ -4924,6 +5041,42 @@ const Workflows: React.FC = () => {
                             />
                             <span>Respect working hours</span>
                           </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.includeExternalNumbers ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    includeExternalNumbers: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Include external phone numbers</span>
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedNode.config?.prioritizeWebPhone ?? true
+                              }
+                              onChange={(e) =>
+                                updateNode(selectedNode.id, {
+                                  config: {
+                                    ...selectedNode.config,
+                                    prioritizeWebPhone: e.target.checked,
+                                  },
+                                })
+                              }
+                              className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span>Prioritize web phone over external numbers</span>
+                          </label>
                         </div>
 
                         <div className="pt-2 space-y-3">
@@ -4934,7 +5087,9 @@ const Workflows: React.FC = () => {
                             <textarea
                               rows={3}
                               placeholder="Please hold while I transfer you to an agent."
-                              value={selectedNode.config?.transferAnnouncement || ""}
+                              value={
+                                selectedNode.config?.transferAnnouncement || ""
+                              }
                               onChange={(e) =>
                                 updateNode(selectedNode.id, {
                                   config: {
@@ -4969,14 +5124,21 @@ const Workflows: React.FC = () => {
                               className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
                             />
                             <p className="text-[10px] text-slate-400 mt-1">
-                              Ringback override (e.g. <span className="font-mono">us</span>, <span className="font-mono">uk</span>, <span className="font-mono">au</span>). Leave blank for default.
+                              Ringback override (e.g.{" "}
+                              <span className="font-mono">us</span>,{" "}
+                              <span className="font-mono">uk</span>,{" "}
+                              <span className="font-mono">au</span>). Leave
+                              blank for default.
                             </p>
                           </div>
 
                           <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
                             <input
                               type="checkbox"
-                              checked={selectedNode.config?.fallbackToVoicemail ?? false}
+                              checked={
+                                selectedNode.config?.fallbackToVoicemail ??
+                                false
+                              }
                               onChange={(e) =>
                                 updateNode(selectedNode.id, {
                                   config: {
@@ -6840,7 +7002,8 @@ const Workflows: React.FC = () => {
                             {sourceNode?.type === "condition" ? (
                               <select
                                 value={
-                                  (selectedEdge.label || "").toLowerCase() === "no"
+                                  (selectedEdge.label || "").toLowerCase() ===
+                                  "no"
                                     ? "no"
                                     : "yes"
                                 }

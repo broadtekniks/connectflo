@@ -109,6 +109,8 @@ type DialTarget =
       memberUserIds: string[];
       numbers: string[];
       clientIdentities: string[];
+      allNumbers?: string[]; // All external numbers in priority order
+      allClientIdentities?: string[]; // All client identities in priority order
     };
 
 function deriveTwilioDialActionUrl(
@@ -144,12 +146,20 @@ function toWsBaseUrl(raw: string): string {
   return `wss://${v.replace(/^\/+/, "")}`;
 }
 
-function buildTwilioStreamTwiml(publicUrl: string): string {
+function buildTwilioStreamTwiml(
+  publicUrl: string,
+  statusCallback?: string
+): string {
   const wsBase = toWsBaseUrl(publicUrl);
   const streamUrl = wsBase ? `${wsBase}/ws/twilio` : "";
+  const statusCallbackAttr = statusCallback
+    ? ` statusCallback="${escapeXml(
+        statusCallback
+      )}" statusCallbackEvent="completed"`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
+  <Connect${statusCallbackAttr}>
     <Stream url="${streamUrl}" />
   </Connect>
 </Response>`;
@@ -161,6 +171,8 @@ function buildTwilioDialTwiml(options: {
   clients?: string[];
   timeoutSeconds: number;
   actionUrl: string;
+  statusCallback?: string;
+  prioritizeWebPhone?: boolean;
 }): string {
   const callerId = escapeXml(options.toCallerId);
   const timeout = Math.min(
@@ -168,6 +180,11 @@ function buildTwilioDialTwiml(options: {
     Math.max(5, Math.floor(options.timeoutSeconds || 20))
   );
   const actionUrl = escapeXml(options.actionUrl);
+  const statusCallbackAttr = options.statusCallback
+    ? ` statusCallback="${escapeXml(
+        options.statusCallback
+      )}" statusCallbackEvent="completed"`
+    : "";
   const numbers = options.numbers
     .map((n) => `<Number>${escapeXml(n)}</Number>`)
     .join("\n    ");
@@ -176,13 +193,73 @@ function buildTwilioDialTwiml(options: {
     .map((c) => `<Client>${escapeXml(c)}</Client>`)
     .join("\n    ");
 
+  // If prioritizeWebPhone is true, put clients before numbers
+  const dialTargets = options.prioritizeWebPhone
+    ? `${clients}\n    ${numbers}`
+    : `${numbers}\n    ${clients}`;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial callerId="${callerId}" timeout="${timeout}" action="${actionUrl}" method="POST" answerOnBridge="true">
-    ${numbers}
-    ${clients}
+  <Dial callerId="${callerId}" timeout="${timeout}" action="${actionUrl}" method="POST" answerOnBridge="true"${statusCallbackAttr}>
+    ${dialTargets}
   </Dial>
 </Response>`;
+}
+
+function pickSequentialDialTargets(options: {
+  number?: string;
+  clientIdentity?: string;
+  prioritizeWebPhone: boolean;
+}): { numbers: string[]; clients: string[] } {
+  const number = String(options.number || "").trim();
+  const client = String(options.clientIdentity || "").trim();
+
+  // Prefer dialing the web phone client in sequential mode when enabled.
+  if (options.prioritizeWebPhone && client) {
+    return { numbers: [], clients: [client] };
+  }
+
+  // Otherwise dial the PSTN number.
+  if (number) {
+    return { numbers: [number], clients: [] };
+  }
+
+  // Fallback: if there's no number but we have a client, dial the client.
+  if (client) {
+    return { numbers: [], clients: [client] };
+  }
+
+  return { numbers: [], clients: [] };
+}
+
+function buildSequentialCallGroupSteps(options: {
+  numbers: string[];
+  clientIdentities: string[];
+  includeExternalNumbers: boolean;
+  prioritizeWebPhone: boolean;
+}): Array<{ numbers: string[]; clients: string[] }> {
+  const steps: Array<{ numbers: string[]; clients: string[] }> = [];
+  const count = Math.max(
+    options.numbers.length,
+    options.clientIdentities.length
+  );
+
+  for (let i = 0; i < count; i++) {
+    const number = String(options.numbers[i] || "").trim();
+    const client = String(options.clientIdentities[i] || "").trim();
+
+    if (options.prioritizeWebPhone) {
+      if (client) steps.push({ numbers: [], clients: [client] });
+      if (options.includeExternalNumbers && number)
+        steps.push({ numbers: [number], clients: [] });
+    } else {
+      if (options.includeExternalNumbers && number)
+        steps.push({ numbers: [number], clients: [] });
+      if (client) steps.push({ numbers: [], clients: [client] });
+    }
+  }
+
+  return steps;
 }
 
 function buildVoicemailTwiml(options: {
@@ -363,11 +440,12 @@ async function resolveDialTargetsFromNode(input: {
     return true;
   };
 
-  const buildUserTarget = (user: any): DialTarget | null => {
+  const buildUserTarget = (
+    user: any,
+    includeExternalNumbers: boolean = true
+  ): DialTarget | null => {
     if (onlyCheckedIn && !user?.isCheckedIn) return null;
     if (!agentIsOpenNow(user)) return null;
-    const number = normalizeE164Like(user?.forwardingPhoneNumber || "");
-    if (!number) return null;
 
     const clientIdentity = (() => {
       const ready =
@@ -378,6 +456,18 @@ async function resolveDialTargetsFromNode(input: {
         ? toTwilioClientIdentity({ tenantId, userId: String(user.id) })
         : undefined;
     })();
+
+    // If we don't want external numbers and there's no web phone ready, skip this user
+    if (!includeExternalNumbers && !clientIdentity) return null;
+
+    // Try forwardingPhoneNumber first, then extensionForwardingNumber, then phoneNumber
+    const number = normalizeE164Like(
+      user?.forwardingPhoneNumber ||
+        user?.extensionForwardingNumber ||
+        user?.phoneNumber ||
+        ""
+    );
+    if (!number) return null;
 
     return { type: "user", userId: user.id, number, clientIdentity };
   };
@@ -451,6 +541,8 @@ async function resolveDialTargetsFromNode(input: {
       const callGroupId = String(config?.callGroupId || "").trim();
       if (!callGroupId) return { error: "Missing callGroupId for forwarding" };
 
+      const includeExternalNumbers = config?.includeExternalNumbers !== false; // Default true
+
       const group = await (prisma as any).callGroup.findFirst({
         where: { id: callGroupId, tenantId },
         include: {
@@ -464,6 +556,8 @@ async function resolveDialTargetsFromNode(input: {
                   agentTimeZone: true,
                   workingHours: true,
                   forwardingPhoneNumber: true,
+                  extensionForwardingNumber: true,
+                  phoneNumber: true,
                   role: true,
                 },
               },
@@ -484,13 +578,20 @@ async function resolveDialTargetsFromNode(input: {
       const memberUserIds: string[] = [];
       const numbers: string[] = [];
       const clientIdentities: string[] = [];
+      const allNumbers: string[] = []; // All external numbers in order
+      const allClientIdentities: string[] = []; // All client identities in order
+
       for (const u of members) {
-        const t = buildUserTarget(u);
+        const t = buildUserTarget(u, includeExternalNumbers);
         if (t && t.type === "user") {
           targets.push(t);
           memberUserIds.push(u.id);
           numbers.push(t.number);
           clientIdentities.push(t.clientIdentity || "");
+
+          // Store all numbers and clients for fallback prioritization
+          allNumbers.push(t.number);
+          allClientIdentities.push(t.clientIdentity || "");
         }
       }
 
@@ -517,6 +618,8 @@ async function resolveDialTargetsFromNode(input: {
     const callGroupId = String(config?.callGroupId || "").trim();
     if (!callGroupId) return { error: "Missing callGroupId" };
 
+    const includeExternalNumbers = config?.includeExternalNumbers !== false; // Default true
+
     const group = await (prisma as any).callGroup.findFirst({
       where: { id: callGroupId, tenantId },
       include: {
@@ -530,6 +633,8 @@ async function resolveDialTargetsFromNode(input: {
                 agentTimeZone: true,
                 workingHours: true,
                 forwardingPhoneNumber: true,
+                extensionForwardingNumber: true,
+                phoneNumber: true,
                 role: true,
               },
             },
@@ -1285,17 +1390,84 @@ router.post("/voice", async (req: Request, res: Response) => {
             return [];
           })();
 
-          if (numbers.length) {
+          const prioritizeWebPhone = config?.prioritizeWebPhone ?? true;
+
+          const includeExternalNumbers =
+            config?.includeExternalNumbers !== false;
+
+          const isSequential = strategy === "SEQUENTIAL";
+
+          // If prioritizing web phone and we have active clients, dial ONLY clients first
+          // Save numbers for fallback in dial action callback (SIMULTANEOUS only)
+          let initialNumbers = numbers;
+          let initialClients = clients;
+          let fallbackNumbers: string[] = [];
+
+          if (!isSequential && prioritizeWebPhone && clients.length > 0) {
+            // Get all numbers from the call group target for proper fallback
+            const t0 = targets[0];
+            if (t0?.type === "callGroup" && Array.isArray(t0.allNumbers)) {
+              initialNumbers = [];
+              initialClients = clients;
+              fallbackNumbers = t0.allNumbers; // Use allNumbers for proper priority order
+            } else {
+              initialNumbers = [];
+              initialClients = clients;
+              fallbackNumbers = numbers;
+            }
+          }
+
+          // For SEQUENTIAL, build explicit steps (client first, then number) so
+          // external only rings after web phone attempt ends.
+          let sequentialSteps: Array<{ numbers: string[]; clients: string[] }> =
+            [];
+          if (isSequential) {
+            const t0 = targets[0];
+            if (t0?.type === "callGroup") {
+              sequentialSteps = buildSequentialCallGroupSteps({
+                numbers: Array.isArray(t0.numbers) ? t0.numbers : [],
+                clientIdentities: Array.isArray(t0.clientIdentities)
+                  ? t0.clientIdentities
+                  : [],
+                includeExternalNumbers,
+                prioritizeWebPhone,
+              });
+            } else {
+              // Non-callGroup sequential case: keep it as a single pick.
+              const picked = pickSequentialDialTargets({
+                number: initialNumbers[0],
+                clientIdentity: initialClients[0],
+                prioritizeWebPhone,
+              });
+              sequentialSteps = [picked];
+            }
+
+            const firstStep = sequentialSteps[0] || {
+              numbers: [],
+              clients: [],
+            };
+            initialNumbers = firstStep.numbers;
+            initialClients = firstStep.clients;
+            fallbackNumbers = [];
+          }
+
+          if (initialNumbers.length || initialClients.length) {
             (global as any).twilioCallMetadata[CallSid].routing = {
               nodeId: first.id,
               nodeLabel: firstLabel,
               strategy,
               targets,
               nextIndex: strategy === "SEQUENTIAL" ? 1 : numbers.length,
+              prioritizeWebPhone,
+              includeExternalNumbers,
+              sequentialSteps:
+                strategy === "SEQUENTIAL" ? sequentialSteps : undefined,
+              fallbackNumbers, // Store external numbers for fallback if web phone doesn't answer
               dialAttempts: [
                 {
                   at: new Date().toISOString(),
-                  numbers,
+                  numbers: initialNumbers,
+                  clients: initialClients,
                 },
               ],
             };
@@ -1308,7 +1480,10 @@ router.post("/voice", async (req: Request, res: Response) => {
 
             res.type("text/xml");
 
-            // If there's a greeting, play it before forwarding
+            // If there's a transfer announcement, play it before forwarding
+            const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+              req.baseUrl
+            }/status`;
             let twiml: string;
             if (greeting && greeting.trim()) {
               const greetingText = normalizeTwilioSayText(greeting);
@@ -1317,10 +1492,12 @@ router.post("/voice", async (req: Request, res: Response) => {
   <Say>${escapeXml(greetingText)}</Say>
   ${buildTwilioDialTwiml({
     toCallerId: To,
-    numbers,
-    clients,
+    numbers: initialNumbers,
+    clients: initialClients,
     timeoutSeconds,
     actionUrl,
+    statusCallback: statusCallbackUrl,
+    prioritizeWebPhone,
   })
     .replace(/<\?xml[^>]*>/, "")
     .replace(/<\/?Response>/g, "")}
@@ -1332,10 +1509,12 @@ router.post("/voice", async (req: Request, res: Response) => {
             } else {
               twiml = buildTwilioDialTwiml({
                 toCallerId: To,
-                numbers,
-                clients,
+                numbers: initialNumbers,
+                clients: initialClients,
                 timeoutSeconds,
                 actionUrl,
+                statusCallback: statusCallbackUrl,
+                prioritizeWebPhone,
               });
               console.log(
                 `[Twilio] Sending dial TwiML for ${firstLabel}:`,
@@ -1350,7 +1529,13 @@ router.post("/voice", async (req: Request, res: Response) => {
     }
 
     res.type("text/xml");
-    const twiml = buildTwilioStreamTwiml(wsBase || publicUrl);
+    const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+      req.baseUrl
+    }/status`;
+    const twiml = buildTwilioStreamTwiml(
+      wsBase || publicUrl,
+      statusCallbackUrl
+    );
     console.log(`[Twilio] Sending TwiML:`, twiml);
     res.send(twiml);
   } catch (error) {
@@ -1423,20 +1608,47 @@ router.post("/dial-action", async (req: Request, res: Response) => {
     // Sequential retry for call groups.
     const t0 = targets[0];
     if (strategy === "SEQUENTIAL" && t0?.type === "callGroup") {
-      const numbers = Array.isArray(t0.numbers) ? t0.numbers : [];
-      if (nextIndex < numbers.length) {
-        const nextNumber = numbers[nextIndex];
-        const clientId = Array.isArray(t0.clientIdentities)
-          ? String(t0.clientIdentities[nextIndex] || "").trim()
-          : "";
+      const prioritizeWebPhone = routing.prioritizeWebPhone ?? true;
+      const includeExternalNumbers = routing.includeExternalNumbers !== false;
+
+      const steps: Array<{ numbers: string[]; clients: string[] }> =
+        Array.isArray(routing?.sequentialSteps)
+          ? routing.sequentialSteps
+          : buildSequentialCallGroupSteps({
+              numbers: Array.isArray(t0.numbers) ? t0.numbers : [],
+              clientIdentities: Array.isArray(t0.clientIdentities)
+                ? t0.clientIdentities
+                : [],
+              includeExternalNumbers,
+              prioritizeWebPhone,
+            });
+
+      if (nextIndex < steps.length) {
+        const step = steps[nextIndex] || { numbers: [], clients: [] };
+
+        console.log(
+          `[Twilio] Sequential dial-action: trying step ${nextIndex + 1}/${
+            steps.length
+          }`,
+          {
+            numbers: step.numbers,
+            clients: step.clients,
+          }
+        );
+
         metadata.routing = {
           ...routing,
           nextIndex: nextIndex + 1,
+          sequentialSteps: steps,
           dialAttempts: [
             ...(Array.isArray(routing?.dialAttempts)
               ? routing.dialAttempts
               : []),
-            { at: new Date().toISOString(), numbers: [nextNumber] },
+            {
+              at: new Date().toISOString(),
+              numbers: step.numbers,
+              clients: step.clients,
+            },
           ],
         };
 
@@ -1446,27 +1658,98 @@ router.post("/dial-action", async (req: Request, res: Response) => {
           nodeId: String(routing?.nodeId || ""),
         });
 
+        const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+          req.baseUrl
+        }/status`;
+
         res.type("text/xml");
         res.send(
           buildTwilioDialTwiml({
             toCallerId:
               String(req.body?.To || "") ||
               String(metadata.workflowContext?.call?.to || ""),
-            numbers: [nextNumber],
-            clients: clientId ? [clientId] : [],
+            numbers: step.numbers,
+            clients: step.clients,
             timeoutSeconds: 20,
             actionUrl,
+            statusCallback: statusCallbackUrl,
+            prioritizeWebPhone,
           })
         );
         return;
+      } else {
+        console.log(
+          `[Twilio] Sequential dial-action: all ${steps.length} steps tried, falling back to stream`
+        );
       }
+    }
+
+    // If prioritizeWebPhone was enabled and we have fallback numbers (didn't dial external numbers yet)
+    // Try the external numbers now since web phone didn't answer
+    if (
+      routing?.prioritizeWebPhone &&
+      Array.isArray(routing?.fallbackNumbers) &&
+      routing.fallbackNumbers.length > 0
+    ) {
+      console.log(
+        `[Twilio] Web phone didn't answer, trying fallback external numbers:`,
+        routing.fallbackNumbers
+      );
+
+      metadata.routing = {
+        ...routing,
+        fallbackNumbers: [], // Clear fallback so we don't retry again
+        dialAttempts: [
+          ...(Array.isArray(routing?.dialAttempts) ? routing.dialAttempts : []),
+          {
+            at: new Date().toISOString(),
+            numbers: routing.fallbackNumbers,
+            clients: [],
+          },
+        ],
+      };
+
+      const actionUrl = deriveTwilioDialActionUrl(req, {
+        callSid: CallSid,
+        workflowId: String(metadata.workflowId || ""),
+        nodeId: String(routing?.nodeId || ""),
+      });
+
+      const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+        req.baseUrl
+      }/status`;
+
+      res.type("text/xml");
+      // Add brief hold announcement before trying external numbers
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Please hold while we try to reach an agent.</Say>
+  ${buildTwilioDialTwiml({
+    toCallerId:
+      String(req.body?.To || "") ||
+      String(metadata.workflowContext?.call?.to || ""),
+    numbers: routing.fallbackNumbers,
+    clients: [],
+    timeoutSeconds: routing.timeoutSeconds || 20,
+    actionUrl,
+    statusCallback: statusCallbackUrl,
+    prioritizeWebPhone: false,
+  })
+    .replace(/<\?xml[^>]*>/, "")
+    .replace(/<\/?Response>/g, "")}
+</Response>`;
+      res.send(twiml);
+      return;
     }
 
     // Otherwise fall back to AI stream.
     const publicUrl =
       process.env.PUBLIC_URL || "wss://chamois-holy-unduly.ngrok-free.app";
+    const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+      req.baseUrl
+    }/status`;
     res.type("text/xml");
-    res.send(buildTwilioStreamTwiml(publicUrl));
+    res.send(buildTwilioStreamTwiml(publicUrl, statusCallbackUrl));
   } catch (error) {
     console.error("[Twilio] dial-action error:", error);
     res.status(500).send("Internal server error");
@@ -1530,9 +1813,34 @@ router.post("/transfer-dial-action", async (req: Request, res: Response) => {
           meta?.workflowContext?.call?.humanTransfer?.config
             ?.fallbackToVoicemail
         );
-        meta.greeting = vmEnabled
-          ? "I'm sorry, I couldn't reach that number. Would you like to try a different number, or should I send you to voicemail?"
-          : "I'm sorry, I couldn't reach that number. Would you like to try a different number?";
+
+        const includeExternalNumbers =
+          meta?.workflowContext?.call?.humanTransfer?.config
+            ?.includeExternalNumbers !== false;
+
+        // If external calling isn't enabled by workflow config, do not offer to try a different number.
+        // Instead, collect callback info for agent follow-up.
+        if (!includeExternalNumbers) {
+          meta.workflowContext = meta.workflowContext || {};
+          meta.workflowContext.callbackRequested = true;
+          meta.workflowContext.call = meta.workflowContext.call || {};
+          meta.workflowContext.call.callbackRequested = true;
+
+          // Ensure the info-collection flow asks for callback number + short message.
+          meta.workflowContext.trigger = meta.workflowContext.trigger || {};
+          meta.workflowContext.trigger.requestInfo =
+            meta.workflowContext.trigger.requestInfo || {};
+          meta.workflowContext.trigger.requestInfo.callbackNumber = true;
+          meta.workflowContext.trigger.requestInfo.reason = true;
+          meta.workflowContext.trigger.requestInfo.name = true;
+
+          meta.greeting =
+            "I'm sorry, I couldn't reach an agent right now. I can take a callback request. Please tell me your full name, the best phone number to call you back, and a short message about what you need. I'll read it back to confirm.";
+        } else {
+          meta.greeting = vmEnabled
+            ? "I'm sorry, I couldn't reach that number. Would you like to try a different number, or should I send you to voicemail?"
+            : "I'm sorry, I couldn't reach that number. Would you like to try a different number?";
+        }
         meta.greetingSpokenByTwilio = false;
         meta.workflowContext = meta.workflowContext || {};
         meta.workflowContext.call = meta.workflowContext.call || {};
@@ -1561,8 +1869,11 @@ router.post("/transfer-dial-action", async (req: Request, res: Response) => {
     // Default: return to AI stream.
     const publicUrl =
       process.env.PUBLIC_URL || "wss://chamois-holy-unduly.ngrok-free.app";
+    const statusCallbackUrl = `${req.protocol}://${req.get("host")}${
+      req.baseUrl
+    }/status`;
     res.type("text/xml");
-    res.send(buildTwilioStreamTwiml(publicUrl));
+    res.send(buildTwilioStreamTwiml(publicUrl, statusCallbackUrl));
   } catch (error) {
     console.error("[Twilio] transfer-dial-action error:", error);
     res.status(500).send("Internal server error");
@@ -1948,42 +2259,60 @@ router.post("/status", async (req: Request, res: Response) => {
       }
     }
 
-    // Track usage and create call log if call completed
-    if (CallStatus === "completed" && CallDuration) {
-      const durationSeconds = Number(CallDuration);
-      const meta = (global as any).twilioCallMetadata?.[CallSid];
-      const tenantId = String(meta?.tenantId || "");
-      const phoneNumberId = String(meta?.phoneNumberId || "");
+    // Get call metadata
+    const meta = (global as any).twilioCallMetadata?.[CallSid];
+    const tenantId = String(meta?.tenantId || "");
+    const phoneNumberId = String(meta?.phoneNumberId || "");
+    const durationSeconds = CallDuration ? Number(CallDuration) : 0;
 
-      if (tenantId && phoneNumberId && Number.isFinite(durationSeconds)) {
-        try {
-          await usageService.trackVoiceCall({
-            tenantId,
-            phoneNumberId,
-            callSid: String(CallSid),
-            durationSeconds: Math.floor(durationSeconds),
-            direction: "inbound",
-          });
-        } catch (e) {
-          console.warn("[Twilio] Failed to track inbound call usage:", e);
-        }
+    // Track usage if call completed
+    if (
+      CallStatus === "completed" &&
+      tenantId &&
+      phoneNumberId &&
+      Number.isFinite(durationSeconds) &&
+      durationSeconds > 0
+    ) {
+      try {
+        await usageService.trackVoiceCall({
+          tenantId,
+          phoneNumberId,
+          callSid: String(CallSid),
+          durationSeconds: Math.floor(durationSeconds),
+          direction: "inbound",
+        });
+      } catch (e) {
+        console.warn("[Twilio] Failed to track inbound call usage:", e);
       }
+    }
 
-      // Create call log entry
-      if (tenantId && CallSid) {
-        try {
-          // Find customer by phone number
-          const fromNumber = String(From || "");
-          const safeDigits = fromNumber.replace(/[^0-9]/g, "").slice(-15);
-          const email = safeDigits ? `voice-${safeDigits}@example.com` : null;
+    // Create call log entry for ALL terminal states (completed, no-answer, busy, etc.)
+    if (
+      tenantId &&
+      CallSid &&
+      ["completed", "no-answer", "busy", "failed", "canceled"].includes(
+        String(CallStatus || "").toLowerCase()
+      )
+    ) {
+      try {
+        // Find customer by phone number
+        const fromNumber = String(From || "");
+        const safeDigits = fromNumber.replace(/[^0-9]/g, "").slice(-15);
+        const email = safeDigits ? `voice-${safeDigits}@example.com` : null;
 
-          const customer = email
-            ? await prisma.user.findUnique({
-                where: { email },
-                select: { id: true },
-              })
-            : null;
+        const customer = email
+          ? await prisma.user.findUnique({
+              where: { email },
+              select: { id: true },
+            })
+          : null;
 
+        // Check if call log already exists to avoid duplicates
+        const existingLog = await prisma.callLog.findFirst({
+          where: { callSid: CallSid },
+        });
+
+        if (!existingLog) {
           await prisma.callLog.create({
             data: {
               tenantId,
@@ -1992,16 +2321,24 @@ router.post("/status", async (req: Request, res: Response) => {
               from: fromNumber,
               to: String(To || ""),
               status: String(CallStatus || "unknown").toLowerCase(),
-              durationSeconds: Math.floor(durationSeconds),
+              durationSeconds: Number.isFinite(durationSeconds)
+                ? Math.floor(durationSeconds)
+                : 0,
               customerId: customer?.id || null,
               phoneNumberId: phoneNumberId || null,
             },
           });
 
-          console.log(`[Twilio] Call log created for ${CallSid}`);
-        } catch (e) {
-          console.warn("[Twilio] Failed to create call log:", e);
+          console.log(
+            `[Twilio] Call log created for ${CallSid} with status ${CallStatus}`
+          );
+        } else {
+          console.log(
+            `[Twilio] Call log already exists for ${CallSid}, skipping`
+          );
         }
+      } catch (e) {
+        console.warn("[Twilio] Failed to create call log:", e);
       }
     }
 
@@ -2181,11 +2518,19 @@ router.post("/dial-extension", async (req: Request, res: Response) => {
       // Fallback to PSTN if web phone offline
       const user = await prisma.user.findUnique({
         where: { id: targetUser.id },
-        select: { phoneNumber: true, forwardingPhoneNumber: true },
+        select: {
+          phoneNumber: true,
+          forwardingPhoneNumber: true,
+          extensionForwardingNumber: true,
+        },
       });
 
+      // Priority: extensionForwardingNumber (admin-configured) > user's forwardingPhoneNumber > user's phoneNumber
       const pstnNumber =
-        user?.forwardingPhoneNumber || user?.phoneNumber || null;
+        (user as any)?.extensionForwardingNumber ||
+        user?.forwardingPhoneNumber ||
+        user?.phoneNumber ||
+        null;
 
       if (pstnNumber) {
         const twiml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2312,11 +2657,19 @@ router.post("/blind-transfer", async (req: Request, res: Response) => {
         // PSTN fallback
         const user = await prisma.user.findUnique({
           where: { id: targetUser.id },
-          select: { phoneNumber: true, forwardingPhoneNumber: true },
+          select: {
+            phoneNumber: true,
+            forwardingPhoneNumber: true,
+            extensionForwardingNumber: true,
+          },
         });
 
+        // Priority: extensionForwardingNumber (admin-configured) > user's forwardingPhoneNumber > user's phoneNumber
         const pstnNumber =
-          user?.forwardingPhoneNumber || user?.phoneNumber || null;
+          (user as any)?.extensionForwardingNumber ||
+          user?.forwardingPhoneNumber ||
+          user?.phoneNumber ||
+          null;
 
         if (pstnNumber) {
           const twiml = `<?xml version="1.0" encoding="UTF-8"?>

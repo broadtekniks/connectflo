@@ -16,6 +16,7 @@ import {
 import { isTenantOpenNow } from "./businessHours";
 import { isWebPhoneReady } from "./webPhonePresence";
 import { toTwilioClientIdentity } from "./twilioClientIdentity";
+import type { User } from "@prisma/client";
 
 const END_CALL_MARKER = "[[END_CALL]]";
 
@@ -1515,6 +1516,14 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    if (session.workflowContext?.callbackRequested) {
+      console.log(
+        `[TwilioRealtime] Transfer suppressed in callback mode (reason=${reason})`
+      );
+      session.transferRequested = false;
+      session.transferReason = undefined;
+      return;
+    }
     if (session.transferInProgress) return;
     session.transferInProgress = true;
 
@@ -1552,6 +1561,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       numbers: string[];
       clients: string[];
       sequential?: boolean;
+      orderedPairs?: Array<{ number?: string; client?: string }>; // preserve per-member pairing/order
+      prioritizeWebPhone?: boolean;
+      includeExternalNumbers?: boolean;
     };
 
     const tenantId = String(session.tenantId || "").trim();
@@ -1577,6 +1589,8 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       config?.respectWorkingHours ?? true
     );
     const onlyCheckedIn = Boolean(config?.onlyCheckedIn ?? true);
+    const includeExternalNumbers = config?.includeExternalNumbers !== false;
+    const prioritizeWebPhone = config?.prioritizeWebPhone ?? true;
 
     const isTenantOpen =
       tenantTimeZone && tenantHours && shouldRespectWorkingHours
@@ -1616,12 +1630,25 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         );
       }
 
-      const number = normalizeE164Like(
-        user?.forwardingPhoneNumber || user?.phoneNumber || ""
-      );
-      if (number) numbers.push(number);
+      if (includeExternalNumbers) {
+        const number = normalizeE164Like(
+          user?.forwardingPhoneNumber ||
+            (user as any)?.extensionForwardingNumber ||
+            user?.phoneNumber ||
+            ""
+        );
+        if (number) numbers.push(number);
+      }
 
-      return { numbers, clients };
+      const numberForPair = numbers[0];
+      const clientForPair = clients[0];
+      return {
+        numbers,
+        clients,
+        orderedPairs: [{ number: numberForPair, client: clientForPair }],
+        includeExternalNumbers,
+        prioritizeWebPhone,
+      };
     };
 
     const userIsAvailable = (user: any): boolean => {
@@ -1629,7 +1656,8 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         tenantId && user?.id
           ? isWebPhoneReady({ tenantId, userId: String(user.id) })
           : false;
-      if (onlyCheckedIn && !user?.isCheckedIn && !ready) return false;
+      // Align with non-realtime routing: checked-in gating is independent of web phone readiness.
+      if (onlyCheckedIn && !user?.isCheckedIn) return false;
       if (!agentIsOpenNow(user)) return false;
       const targets = userTargets(user);
       return targets.numbers.length > 0 || targets.clients.length > 0;
@@ -1707,12 +1735,48 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                 isCheckedIn: true,
                 agentTimeZone: true,
                 workingHours: true,
+                extensionForwardingNumber: true,
                 forwardingPhoneNumber: true,
                 phoneNumber: true,
               } as any,
             });
-            if (!user || !userIsAvailable(user)) return null;
-            return userTargets(user);
+
+            // Check if user is available
+            if (user && userIsAvailable(user)) {
+              return userTargets(user);
+            }
+
+            // User unavailable - check if fallback to external number is enabled
+            const enableFallback = config?.enableFallbackExternal ?? false;
+            if (!enableFallback) {
+              return null;
+            }
+
+            // Use custom fallback number if provided, otherwise use user's extension forwarding number
+            const customFallback = normalizeE164Like(
+              String(config?.fallbackExternalNumber || "")
+            );
+            const userExtensionFallback = normalizeE164Like(
+              String((user as any)?.extensionForwardingNumber || "")
+            );
+            const fallbackExternal = customFallback || userExtensionFallback;
+
+            if (fallbackExternal) {
+              console.log(
+                `[TwilioRealtime] User unavailable, attempting fallback to external: ${fallbackExternal} (${
+                  customFallback ? "custom" : "from extension"
+                })`
+              );
+              if (!isAllowedExternalNumber(fallbackExternal)) {
+                console.warn(
+                  `[TwilioRealtime] Fallback external number ${fallbackExternal} blocked by allow-list`
+                );
+                return null;
+              }
+              return { numbers: [fallbackExternal], clients: [] };
+            }
+
+            return null;
           }
 
           if (targetType === "callGroup") {
@@ -1730,6 +1794,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                         isCheckedIn: true,
                         agentTimeZone: true,
                         workingHours: true,
+                        extensionForwardingNumber: true,
                         forwardingPhoneNumber: true,
                         phoneNumber: true,
                         role: true,
@@ -1747,18 +1812,28 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               );
             const numbers: string[] = [];
             const clients: string[] = [];
+            const orderedPairs: Array<{ number?: string; client?: string }> =
+              [];
             for (const u of members) {
               if (!userIsAvailable(u)) continue;
               const t = userTargets(u);
               numbers.push(...t.numbers);
               clients.push(...t.clients);
+              orderedPairs.push({ number: t.numbers[0], client: t.clients[0] });
             }
             const sequential =
-              String(config?.ringStrategy || "")
+              String((group as any)?.ringStrategy || config?.ringStrategy || "")
                 .trim()
                 .toUpperCase() === "SEQUENTIAL";
             if (!numbers.length && !clients.length) return null;
-            return { numbers, clients, sequential };
+            return {
+              numbers,
+              clients,
+              sequential,
+              orderedPairs,
+              includeExternalNumbers,
+              prioritizeWebPhone,
+            };
           }
 
           return null;
@@ -1781,6 +1856,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                       isCheckedIn: true,
                       agentTimeZone: true,
                       workingHours: true,
+                      extensionForwardingNumber: true,
                       forwardingPhoneNumber: true,
                       phoneNumber: true,
                       role: true,
@@ -1799,20 +1875,29 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
 
           const numbers: string[] = [];
           const clients: string[] = [];
+          const orderedPairs: Array<{ number?: string; client?: string }> = [];
           for (const u of members) {
             if (!userIsAvailable(u)) continue;
             const t = userTargets(u);
             numbers.push(...t.numbers);
             clients.push(...t.clients);
+            orderedPairs.push({ number: t.numbers[0], client: t.clients[0] });
           }
 
           const sequential =
-            String(config?.ringStrategy || "")
+            String((group as any)?.ringStrategy || config?.ringStrategy || "")
               .trim()
               .toUpperCase() === "SEQUENTIAL";
 
           if (!numbers.length && !clients.length) return null;
-          return { numbers, clients, sequential };
+          return {
+            numbers,
+            clients,
+            sequential,
+            orderedPairs,
+            includeExternalNumbers,
+            prioritizeWebPhone,
+          };
         }
 
         return null;
@@ -1835,6 +1920,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
             isCheckedIn: true,
             agentTimeZone: true,
             workingHours: true,
+            extensionForwardingNumber: true,
             forwardingPhoneNumber: true,
             phoneNumber: true,
           } as any,
@@ -1890,9 +1976,51 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         }
 
         console.warn(
-          `[TwilioRealtime] Human transfer requested but no available target (reason=${reason}).`
+          `[TwilioRealtime] Human transfer requested but no available target (reason=${reason}). Will notify AI after brief delay.`
         );
-        // Keep the realtime session alive if we didn't actually transfer.
+
+        // Mark that we're requesting a callback so we can create a conversation when phone is provided
+        if (!session.workflowContext) {
+          session.workflowContext = {};
+        }
+        session.workflowContext.callbackRequested = true;
+
+        // Reset callback intake state so previously collected values don't satisfy callback requirements.
+        session.workflowContext.callbackNameConfirmed = false;
+        session.workflowContext.callbackNumberConfirmed = false;
+        session.workflowContext.callbackMessageCollected = false;
+        session.workflowContext.callbackRequestCreated = false;
+        delete (session.workflowContext as any).pendingCallbackNumberCandidate;
+
+        // Wait 3 seconds to simulate checking for agents, then notify AI
+        // This creates a natural pause that simulates real PBX behavior
+        setTimeout(() => {
+          // Notify the AI that transfer failed so it can inform the caller
+          if (session.openaiWs) {
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: `Transfer to agent failed - no agents are currently available. Politely inform the caller that no agents are available right now, apologize for the inconvenience, and ask if you can continue to help them or if they would prefer to leave a callback number.`,
+                    },
+                  ],
+                },
+              })
+            );
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+              })
+            );
+          }
+        }, 3000);
+
+        // Keep the realtime session alive
         session.transferInProgress = false;
         return;
       }
@@ -1916,7 +2044,13 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         phoneNumberId: phoneNumberId || undefined,
       });
 
-      const sequentialAttr = resolved.sequential ? ` sequential="true"` : "";
+      // If we have both client + number targets, force sequential to avoid simultaneous ringing.
+      // Also used to ensure per-member client-first then number fallback.
+      const effectiveSequential = Boolean(
+        resolved.sequential ||
+          (dialNumbers.length > 0 && dialClients.length > 0)
+      );
+      const sequentialAttr = effectiveSequential ? ` sequential="true"` : "";
       const ringToneEffective =
         ringToneConfigured || (dialNumbers.length ? "us" : "");
       const ringToneAttr = ringToneEffective
@@ -1926,12 +2060,48 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         ? ` action="${escapeXmlAttr(actionUrl)}" method="POST"`
         : "";
 
-      const numbersXml = dialNumbers
-        .map((n) => `<Number>${escapeXmlText(n)}</Number>`)
-        .join("\n    ");
-      const clientsXml = dialClients
-        .map((c) => `<Client>${escapeXmlText(c)}</Client>`)
-        .join("\n    ");
+      const preferWeb = resolved.prioritizeWebPhone ?? prioritizeWebPhone;
+      const allowExternal =
+        resolved.includeExternalNumbers ?? includeExternalNumbers;
+
+      // Build a deterministic sequential order:
+      // - If we have per-member pairing, interleave (client -> number) per member.
+      // - Otherwise, fall back to clients-first or numbers-first.
+      const dialTargetsXml = (() => {
+        const pairs = Array.isArray(resolved.orderedPairs)
+          ? resolved.orderedPairs
+          : [];
+        if (pairs.length && effectiveSequential) {
+          const parts: string[] = [];
+          for (const p of pairs) {
+            const client = String(p?.client || "").trim();
+            const number = normalizeDialNumber(String(p?.number || "").trim());
+
+            if (preferWeb) {
+              if (client)
+                parts.push(`<Client>${escapeXmlText(client)}</Client>`);
+              if (allowExternal && number)
+                parts.push(`<Number>${escapeXmlText(number)}</Number>`);
+            } else {
+              if (allowExternal && number)
+                parts.push(`<Number>${escapeXmlText(number)}</Number>`);
+              if (client)
+                parts.push(`<Client>${escapeXmlText(client)}</Client>`);
+            }
+          }
+          return parts.join("\n    ");
+        }
+
+        const numbersXml = dialNumbers
+          .map((n) => `<Number>${escapeXmlText(n)}</Number>`)
+          .join("\n    ");
+        const clientsXml = dialClients
+          .map((c) => `<Client>${escapeXmlText(c)}</Client>`)
+          .join("\n    ");
+        return preferWeb
+          ? `${clientsXml}\n    ${numbersXml}`
+          : `${numbersXml}\n    ${clientsXml}`;
+      })();
 
       console.log(
         `[TwilioRealtime] Initiating human transfer for call ${session.callSid} (numbers=${dialNumbers.length}, clients=${dialClients.length}, reason=${reason})`
@@ -1955,8 +2125,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
   <Dial${
     callerIdForDial ? ` callerId="${escapeXmlAttr(callerIdForDial)}"` : ""
   } timeout="${timeout}" answerOnBridge="true"${sequentialAttr}${ringToneAttr}${actionAttr}>
-    ${numbersXml}
-    ${clientsXml}
+    ${dialTargetsXml}
   </Dial>
 </Response>`;
 
@@ -2056,9 +2225,15 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
+    const realtimeModel =
+      process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
+
     return new Promise((resolve, reject) => {
+      const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
+        realtimeModel
+      )}`;
       const ws = new WebSocket(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17",
+        realtimeUrl,
         {
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
@@ -2292,6 +2467,10 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
         if (transcript) {
           console.log(`[TwilioRealtime] User transcript: ${transcript}`);
 
+          const callbackMode = Boolean(
+            session.workflowContext?.callbackRequested
+          );
+
           // Update detected intent (keyword matching against tenant-configured intents).
           try {
             const rawIntents = session.workflowContext?.ai?.intents;
@@ -2313,25 +2492,17 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               !session.transferInProgress &&
               !session.transferRequested
             ) {
-              console.log(
-                `[TwilioRealtime] Transfer requested by intent detection - requesting acknowledgment response`
-              );
-              session.transferRequested = true;
-              session.transferReason = "transcript_intent";
-
-              // Request AI to acknowledge the transfer
-              if (session.openaiWs && !session.responseInProgress) {
-                session.responseRequested = true;
-                session.openaiWs.send(
-                  JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["audio", "text"],
-                      instructions:
-                        "Acknowledge that you will transfer the caller to an agent. Say something like 'Of course! Let me transfer you to an agent now.' Keep it brief.",
-                    },
-                  })
+              if (callbackMode) {
+                // In callback-request mode, do not attempt another transfer.
+                session.transferRequested = false;
+                session.transferReason = undefined;
+              } else {
+                console.log(
+                  `[TwilioRealtime] Transfer requested by intent detection - will execute after current response`
                 );
+                session.transferRequested = true;
+                session.transferReason = "transcript_intent";
+                // Don't send acknowledgment here - the keyword check below will handle it
               }
             }
           } catch (e) {
@@ -2340,7 +2511,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           }
 
           // Fallback: Direct keyword check for transfer requests (more aggressive)
-          if (!session.transferInProgress) {
+          if (!session.transferInProgress && !callbackMode) {
             const lowerTranscript = transcript.toLowerCase();
             const transferKeywords = [
               "transfer",
@@ -2388,6 +2559,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
                 session.workflowContext.customer || {};
               session.workflowContext.customer.name =
                 session.workflowContext.pendingIdentityName;
+              if (session.workflowContext?.callbackRequested) {
+                session.workflowContext.callbackNameConfirmed = true;
+              }
               session.workflowContext.infoCollected =
                 session.workflowContext.infoCollected || [];
               if (!session.workflowContext.infoCollected.includes("name")) {
@@ -2397,8 +2571,60 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               console.log(
                 `[TwilioRealtime] Identity confirmed for ${session.workflowContext.customer.name}`
               );
+
+              if (
+                session.workflowContext?.callbackRequested &&
+                session.openaiWs &&
+                !session.responseInProgress
+              ) {
+                this.promptForNextItem(sessionId, []);
+              }
             } else if (transcriptIsNegative(transcript)) {
               delete session.workflowContext.pendingIdentityName;
+            }
+          }
+
+          // Auto-handle callback phone confirmations when we have a pending candidate.
+          if (session.workflowContext?.pendingCallbackNumberCandidate) {
+            const pending = String(
+              session.workflowContext.pendingCallbackNumberCandidate
+            ).trim();
+
+            if (transcriptIsAffirmative(transcript)) {
+              session.workflowContext.customer =
+                session.workflowContext.customer || {};
+              session.workflowContext.customer.phone = pending;
+              session.workflowContext.callbackNumberConfirmed = true;
+              session.workflowContext.infoCollected =
+                session.workflowContext.infoCollected || [];
+              if (!session.workflowContext.infoCollected.includes("phone")) {
+                session.workflowContext.infoCollected.push("phone");
+              }
+              delete session.workflowContext.pendingCallbackNumberCandidate;
+              console.log(
+                `[TwilioRealtime] Callback number confirmed: ${session.workflowContext.customer.phone}`
+              );
+
+              if (session.openaiWs && !session.responseInProgress) {
+                this.promptForNextItem(sessionId, []);
+              }
+            } else if (transcriptIsNegative(transcript)) {
+              delete session.workflowContext.pendingCallbackNumberCandidate;
+              session.workflowContext.callbackNumberConfirmed = false;
+
+              if (session.openaiWs && !session.responseInProgress) {
+                session.responseRequested = true;
+                session.openaiWs.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio", "text"],
+                      instructions:
+                        "Okay. What is the best callback phone number to reach you? Please say the number slowly. After they provide it, use update_customer_info with phone.",
+                    },
+                  })
+                );
+              }
             }
           }
 
@@ -2521,7 +2747,11 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           }
 
           // Execute transfer if requested after AI finishes speaking
-          if (session.transferRequested && !session.transferInProgress) {
+          if (
+            session.transferRequested &&
+            !session.transferInProgress &&
+            !session.workflowContext?.callbackRequested
+          ) {
             console.log(
               `[TwilioRealtime] AI response complete - waiting 2s for audio to finish before executing transfer (reason=${session.transferReason})`
             );
@@ -2537,17 +2767,21 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               void this.initiateHumanTransfer(sessionId, reason);
             }, 2000);
             return;
+          } else if (session.workflowContext?.callbackRequested) {
+            // Clear any stale transfer flags so we don't re-trigger during callback intake/confirmation.
+            session.transferRequested = false;
+            session.transferReason = undefined;
           }
 
           if (session.pendingHangupReason && session.hangupAfterThisResponse) {
-            // Wait 2 seconds to ensure the goodbye audio finishes playing before hanging up
+            // Wait 3 seconds to ensure the goodbye audio finishes playing before hanging up
             console.log(
-              `[TwilioRealtime] Waiting 2s for goodbye audio to complete before hanging up`
+              `[TwilioRealtime] Waiting 3s for goodbye audio to complete before hanging up`
             );
             const hangupReason = session.pendingHangupReason; // Capture reason before timeout
             setTimeout(() => {
               this.hangupCall(sessionId, hangupReason);
-            }, 2000);
+            }, 3000);
           } else {
             // Set up silence detection - check if user responds within 20 seconds
             this.scheduleSilenceCheck(sessionId);
@@ -2708,12 +2942,21 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
 
         // Track what information was just collected
         const collectedItems: string[] = [];
+        const callbackMode = Boolean(
+          session.workflowContext?.callbackRequested
+        );
 
         // Update context with provided information
         if (args.name) {
           session.workflowContext.customer.name = args.name;
-          collectedItems.push("name");
-          session.workflowContext.identityVerified = true;
+          if (callbackMode) {
+            session.workflowContext.pendingIdentityName = String(args.name);
+            session.workflowContext.identityVerified = false;
+            session.workflowContext.callbackNameConfirmed = false;
+          } else {
+            collectedItems.push("name");
+            session.workflowContext.identityVerified = true;
+          }
           console.log(`[TwilioRealtime] Saved customer name: ${args.name}`);
         }
         if (args.email) {
@@ -2722,8 +2965,15 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           console.log(`[TwilioRealtime] Saved customer email: ${args.email}`);
         }
         if (args.phone) {
-          session.workflowContext.customer.phone = args.phone;
-          collectedItems.push("phone");
+          if (callbackMode) {
+            session.workflowContext.pendingCallbackNumberCandidate = String(
+              args.phone
+            );
+            session.workflowContext.callbackNumberConfirmed = false;
+          } else {
+            session.workflowContext.customer.phone = args.phone;
+            collectedItems.push("phone");
+          }
           console.log(`[TwilioRealtime] Saved customer phone: ${args.phone}`);
         }
         if (args.orderNumber) {
@@ -2743,6 +2993,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           }
           session.workflowContext.customer.metadata.callReason = args.reason;
           collectedItems.push("reason");
+          if (callbackMode) {
+            session.workflowContext.callbackMessageCollected = true;
+          }
           console.log(`[TwilioRealtime] Saved call reason: ${args.reason}`);
         }
 
@@ -2761,6 +3014,45 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
               },
             })
           );
+
+          if (
+            callbackMode &&
+            session.workflowContext?.pendingIdentityName &&
+            !session.workflowContext?.callbackNameConfirmed
+          ) {
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `Just to confirm, is your full name ${session.workflowContext.pendingIdentityName}? Please say yes or no.`,
+                },
+              })
+            );
+            return;
+          }
+
+          if (
+            callbackMode &&
+            session.workflowContext?.pendingCallbackNumberCandidate &&
+            !session.workflowContext?.callbackNumberConfirmed
+          ) {
+            const pending = String(
+              session.workflowContext.pendingCallbackNumberCandidate
+            ).trim();
+            session.responseRequested = true;
+            session.openaiWs.send(
+              JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `Just to confirm, is your callback phone number ${pending}? Please say yes or no. Read the number slowly.`,
+                },
+              })
+            );
+            return;
+          }
 
           // Check if there are more items to collect
           this.promptForNextItem(sessionId, collectedItems);
@@ -2839,7 +3131,10 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
           session.workflowContext?.conversation?.intent || ""
         ).trim();
 
-        if (session.transferInProgress || currentIntent === "request_human") {
+        if (
+          !session.workflowContext?.callbackRequested &&
+          (session.transferInProgress || currentIntent === "request_human")
+        ) {
           if (!session.transferInProgress) {
             void this.initiateHumanTransfer(sessionId, "intent=request_human");
           }
@@ -2920,7 +3215,15 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     const session = this.sessions.get(sessionId);
     if (!session?.openaiWs) return;
 
-    const requestInfo = session.workflowContext?.trigger?.requestInfo || {};
+    const callbackMode = Boolean(session.workflowContext?.callbackRequested);
+    const requestInfoRaw = session.workflowContext?.trigger?.requestInfo || {};
+    const requestInfo = callbackMode
+      ? {
+          name: true,
+          callbackNumber: true,
+          reason: true,
+        }
+      : requestInfoRaw;
 
     // Initialize collected tracker if not exists
     if (!session.workflowContext) session.workflowContext = {};
@@ -2930,26 +3233,33 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
 
     // If we already have customer info from context, treat it as collected
     // so we don't re-ask after the caller says "that's it".
-    if (requestInfo.name === true && session.workflowContext?.customer?.name) {
-      if (!session.workflowContext.infoCollected.includes("name")) {
-        session.workflowContext.infoCollected.push("name");
+    // BUT: in callback mode, we must explicitly collect/confirm name + callback number,
+    // so do not auto-mark them as collected.
+    if (!callbackMode) {
+      if (
+        requestInfo.name === true &&
+        session.workflowContext?.customer?.name
+      ) {
+        if (!session.workflowContext.infoCollected.includes("name")) {
+          session.workflowContext.infoCollected.push("name");
+        }
       }
-    }
-    if (
-      requestInfo.email === true &&
-      session.workflowContext?.customer?.email
-    ) {
-      if (!session.workflowContext.infoCollected.includes("email")) {
-        session.workflowContext.infoCollected.push("email");
+      if (
+        requestInfo.email === true &&
+        session.workflowContext?.customer?.email
+      ) {
+        if (!session.workflowContext.infoCollected.includes("email")) {
+          session.workflowContext.infoCollected.push("email");
+        }
       }
-    }
-    if (
-      requestInfo.callbackNumber === true &&
-      (session.workflowContext?.customer?.phone ||
-        session.workflowContext?.call?.from)
-    ) {
-      if (!session.workflowContext.infoCollected.includes("phone")) {
-        session.workflowContext.infoCollected.push("phone");
+      if (
+        requestInfo.callbackNumber === true &&
+        (session.workflowContext?.customer?.phone ||
+          session.workflowContext?.call?.from)
+      ) {
+        if (!session.workflowContext.infoCollected.includes("phone")) {
+          session.workflowContext.infoCollected.push("phone");
+        }
       }
     }
 
@@ -2961,44 +3271,66 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       )}`
     );
 
-    // Build list of what still needs to be collected based ONLY on configuration
+    // Build list of what still needs to be collected.
+    // In callback mode, base this on callback confirmation flags, not infoCollected.
     const stillNeeded: string[] = [];
     const stillNeededKeys: string[] = [];
 
-    if (
-      requestInfo.name === true &&
-      !session.workflowContext.infoCollected.includes("name")
-    ) {
-      stillNeeded.push("their full name");
-      stillNeededKeys.push("name");
-    }
-    if (
-      requestInfo.email === true &&
-      !session.workflowContext.infoCollected.includes("email")
-    ) {
-      stillNeeded.push("their email address");
-      stillNeededKeys.push("email");
-    }
-    if (
-      requestInfo.callbackNumber === true &&
-      !session.workflowContext.infoCollected.includes("phone")
-    ) {
-      stillNeeded.push("a callback phone number");
-      stillNeededKeys.push("phone");
-    }
-    if (
-      requestInfo.orderNumber === true &&
-      !session.workflowContext.infoCollected.includes("orderNumber")
-    ) {
-      stillNeeded.push("their order or account number");
-      stillNeededKeys.push("orderNumber");
-    }
-    if (
-      requestInfo.reason === true &&
-      !session.workflowContext.infoCollected.includes("reason")
-    ) {
-      stillNeeded.push("the reason for their call");
-      stillNeededKeys.push("reason");
+    if (callbackMode) {
+      const needName = !Boolean(session.workflowContext?.callbackNameConfirmed);
+      const needPhone = !Boolean(
+        session.workflowContext?.callbackNumberConfirmed
+      );
+      const needMessage = !Boolean(
+        session.workflowContext?.callbackMessageCollected
+      );
+
+      if (needName) {
+        stillNeeded.push("their full name");
+        stillNeededKeys.push("name");
+      } else if (needPhone) {
+        stillNeeded.push("a callback phone number");
+        stillNeededKeys.push("phone");
+      } else if (needMessage) {
+        stillNeeded.push("a short message about what they need");
+        stillNeededKeys.push("reason");
+      }
+    } else {
+      if (
+        requestInfo.name === true &&
+        !session.workflowContext.infoCollected.includes("name")
+      ) {
+        stillNeeded.push("their full name");
+        stillNeededKeys.push("name");
+      }
+      if (
+        requestInfo.email === true &&
+        !session.workflowContext.infoCollected.includes("email")
+      ) {
+        stillNeeded.push("their email address");
+        stillNeededKeys.push("email");
+      }
+      if (
+        requestInfo.callbackNumber === true &&
+        !session.workflowContext.infoCollected.includes("phone")
+      ) {
+        stillNeeded.push("a callback phone number");
+        stillNeededKeys.push("phone");
+      }
+      if (
+        requestInfo.orderNumber === true &&
+        !session.workflowContext.infoCollected.includes("orderNumber")
+      ) {
+        stillNeeded.push("their order or account number");
+        stillNeededKeys.push("orderNumber");
+      }
+      if (
+        requestInfo.reason === true &&
+        !session.workflowContext.infoCollected.includes("reason")
+      ) {
+        stillNeeded.push("the reason for their call");
+        stillNeededKeys.push("reason");
+      }
     }
 
     if (stillNeeded.length > 0) {
@@ -3010,7 +3342,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
 
       // Prompt for the next item
       const nextItem = stillNeeded[0];
-      const continueInstructions = `Thank the caller briefly, then ask for ${nextItem}. Use the update_customer_info function when they provide it.`;
+      const continueInstructions = `Ask the caller for ${nextItem}. Use the update_customer_info function when they provide it.`;
 
       session.responseRequested = true;
       session.openaiWs.send(
@@ -3025,20 +3357,69 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     } else {
       console.log(`[TwilioRealtime] All requested information collected`);
 
-      // All info collected, proceed with normal conversation
-      const doneInstructions =
-        "Thank the caller for providing their information. Now ask how you can help them today.";
+      // Callback-request flow: once we collected name + callback number + message,
+      // create the callback request and close out the call.
+      const isCallbackRequestReady =
+        Boolean(session.workflowContext?.callbackRequested) &&
+        Boolean(session.workflowContext?.callbackNameConfirmed) &&
+        Boolean(session.workflowContext?.callbackNumberConfirmed) &&
+        Boolean(session.workflowContext?.callbackMessageCollected);
 
-      session.responseRequested = true;
-      session.openaiWs.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: doneInstructions,
-          },
-        })
-      );
+      if (isCallbackRequestReady) {
+        const callbackNumber = String(
+          session.workflowContext?.customer?.phone || ""
+        ).trim();
+        const customerName = String(
+          session.workflowContext?.customer?.name || ""
+        ).trim();
+        const message = String(
+          session.workflowContext?.customer?.metadata?.callReason || ""
+        ).trim();
+
+        if (!session.workflowContext.callbackRequestCreated && callbackNumber) {
+          session.workflowContext.callbackRequestCreated = true;
+          this.createCallbackRequest(session, callbackNumber).catch((err) => {
+            console.error(
+              "[TwilioRealtime] Failed to create callback request:",
+              err
+            );
+          });
+        }
+
+        const doneInstructions = `Read back the callback details and ask the caller to confirm they are correct.
+- Name: ${customerName || "(missing)"}
+- Callback number: ${callbackNumber || "(missing)"}
+- Message: ${message || "(missing)"}
+
+Read the callback number slowly and ask them to confirm yes/no. If they say it's wrong, ask for the corrected number and call update_customer_info with phone.
+If they confirm, say: "Perfect! We've received your callback request. One of our agents will call you back as soon as possible. Thank you for your patience. Goodbye." Then include the token ${END_CALL_MARKER} in your text output (not spoken).`;
+
+        session.responseRequested = true;
+        session.openaiWs.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: doneInstructions,
+            },
+          })
+        );
+      } else {
+        // Normal info collection - continue conversation
+        const doneInstructions =
+          "Thank the caller for providing their information. Now ask how you can help them today.";
+
+        session.responseRequested = true;
+        session.openaiWs.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: doneInstructions,
+            },
+          })
+        );
+      }
     }
   }
 
@@ -3113,6 +3494,139 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
   }
 
   /**
+   * Create a callback request conversation when customer provides callback number
+   */
+  private async createCallbackRequest(
+    session: TwilioRealtimeSession,
+    callbackNumber: string
+  ): Promise<void> {
+    try {
+      const tenantId = session.tenantId;
+      const fromNumber = session.workflowContext?.call?.from || "unknown";
+      const customerName =
+        session.workflowContext?.customer?.name || `Caller ${fromNumber}`;
+      const customerEmail = session.workflowContext?.customer?.email;
+
+      if (!tenantId) {
+        console.warn(
+          "[TwilioRealtime] Cannot create callback request - no tenantId"
+        );
+        return;
+      }
+
+      console.log(
+        `[TwilioRealtime] Creating callback request for ${customerName} at ${callbackNumber}`
+      );
+
+      // Find or create customer user
+      const phoneDigits = fromNumber.replace(/\D/g, "");
+      const tempEmail =
+        customerEmail ||
+        `voice-callback-${phoneDigits}-${Date.now()}@temp.connectflo.com`;
+
+      let customer = await prisma.user.findFirst({
+        where: {
+          OR: [{ email: tempEmail }, { phoneNumber: fromNumber, tenantId }],
+          tenantId,
+        },
+      });
+
+      if (!customer) {
+        customer = await prisma.user.create({
+          data: {
+            email: tempEmail,
+            name: customerName,
+            phoneNumber: fromNumber,
+            role: "CUSTOMER",
+            tenantId,
+            avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(
+              customerName
+            )}`,
+          },
+        });
+      }
+
+      // Find existing open VOICE conversation or create new one
+      let conversation = await prisma.conversation.findFirst({
+        where: {
+          tenantId,
+          channel: "VOICE",
+          customerId: customer.id,
+          status: { not: "RESOLVED" },
+        },
+        orderBy: { lastActivity: "desc" },
+      });
+
+      if (!conversation) {
+        // Get phone number for assignment
+        const phoneNumberId = String(
+          session.workflowContext?.trigger?.phoneNumberId ||
+            session.workflowContext?.call?.phoneNumberId ||
+            ""
+        ).trim();
+
+        const phoneNumber = phoneNumberId
+          ? await prisma.phoneNumber.findUnique({
+              where: { id: phoneNumberId },
+              select: { afterHoursNotifyUserId: true },
+            })
+          : null;
+
+        conversation = await prisma.conversation.create({
+          data: {
+            tenantId,
+            channel: "VOICE",
+            customerId: customer.id,
+            assigneeId: phoneNumber?.afterHoursNotifyUserId || null,
+            subject: `Callback Request from ${customerName}`,
+            lastActivity: new Date(),
+            tags: ["callback-requested"],
+            status: "OPEN",
+          },
+        });
+      }
+
+      // Create message with callback request - format like voicemail, not chat
+      const callReason =
+        session.workflowContext?.customer?.metadata?.callReason ||
+        "general inquiry";
+      const messageContent = `Callback request received from ${fromNumber}${
+        callbackNumber !== fromNumber
+          ? ` - Customer provided callback number: ${callbackNumber}`
+          : ""
+      }\n\nCustomer Name: ${customerName}\nReason for Call: ${callReason}\n\nCustomer was unable to reach an agent and requested a callback.`;
+
+      await prisma.$transaction([
+        prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            tenantId,
+            content: messageContent,
+            sender: "CUSTOMER",
+          },
+        }),
+        prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            lastActivity: new Date(),
+            status: "PENDING", // Set to PENDING so it shows as requiring action
+          },
+        }),
+      ]);
+
+      console.log(
+        `[TwilioRealtime] Callback request created in conversation ${conversation.id}`
+      );
+
+      // Note: Socket.IO notifications would be handled by the Express app, not this service
+      // The conversation/message creation will be visible in the inbox once agents refresh
+    } catch (error) {
+      console.error("[TwilioRealtime] Error creating callback request:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Request missing customer information after greeting
    */
   private requestMissingInformation(sessionId: string): void {
@@ -3127,7 +3641,18 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     }
 
     // Get request info configuration from workflow context
-    const requestInfo = session.workflowContext?.trigger?.requestInfo || {};
+    const requestInfoRaw = session.workflowContext?.trigger?.requestInfo || {};
+
+    // If we're in callback-request mode (e.g., transfer failed and external calling isn't allowed),
+    // force collection of callback info regardless of workflow trigger settings.
+    const callbackMode = Boolean(session.workflowContext?.callbackRequested);
+    const requestInfo = callbackMode
+      ? {
+          name: true,
+          callbackNumber: true,
+          reason: true,
+        }
+      : requestInfoRaw;
 
     console.log(`[TwilioRealtime] requestMissingInformation called`);
     console.log(
@@ -3142,9 +3667,24 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     // Check if we have customer information (for logging purposes)
     const hasCustomerName = session.workflowContext?.customer?.name;
     const hasCustomerEmail = session.workflowContext?.customer?.email;
-    const hasPhoneNumber =
+
+    const callbackNumberConfirmed = Boolean(
+      session.workflowContext?.callbackNumberConfirmed
+    );
+    const callbackMessageCollected = Boolean(
+      session.workflowContext?.callbackMessageCollected
+    );
+
+    const callbackNumberCandidate = String(
       session.workflowContext?.customer?.phone ||
-      session.workflowContext?.call?.from;
+        session.workflowContext?.call?.from ||
+        ""
+    ).trim();
+    const hasPhoneNumber = callbackMode
+      ? callbackNumberConfirmed
+        ? callbackNumberCandidate
+        : ""
+      : callbackNumberCandidate;
 
     console.log(
       `[TwilioRealtime] Customer info - name: ${hasCustomerName}, email: ${hasCustomerEmail}, phone: ${hasPhoneNumber}`
@@ -3188,7 +3728,7 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       infoToRequest.push("a callback phone number");
       console.log(
         `[TwilioRealtime] Will request callback number (currently have: ${
-          hasPhoneNumber || "none"
+          callbackNumberCandidate || "none"
         })`
       );
     }
@@ -3199,7 +3739,13 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
     }
 
     if (requestInfo.reason === true) {
-      infoToRequest.push("the reason for their call");
+      if (!callbackMode || !callbackMessageCollected) {
+        infoToRequest.push(
+          callbackMode
+            ? "a short message about what they need"
+            : "the reason for their call"
+        );
+      }
       console.log(`[TwilioRealtime] Will request call reason`);
     }
 
@@ -3246,7 +3792,9 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       session.workflowContext.infoCollected || [];
 
     // Build collection instructions with verification if we have existing data
-    let collectionInstructions = `You need to collect the following information from the caller: ${infoList}.\n\n`;
+    let collectionInstructions = callbackMode
+      ? `We could not reach an agent. You must take a callback request and you MUST NOT offer to dial any other number unless the workflow explicitly enables external calling.\n\nCollect the following: ${infoList}.\n\nIMPORTANT: Confirm both the caller's name and callback phone number for correctness.\n\n`
+      : `You need to collect the following information from the caller: ${infoList}.\n\n`;
 
     // If we have existing customer name, ask for verification first
     if (
@@ -3256,6 +3804,26 @@ export class TwilioRealtimeVoiceService extends EventEmitter {
       session.workflowContext = session.workflowContext || {};
       session.workflowContext.pendingIdentityName = String(hasCustomerName);
       collectionInstructions += `IMPORTANT IDENTITY CHECK: Our records show this number belongs to ${hasCustomerName}. Start by asking: "Are you ${hasCustomerName}?" If they say YES, immediately call update_customer_info with name "${hasCustomerName}" (even though we already have it) to mark it verified/collected. If they say NO, ask for their full name and call update_customer_info with the correct name.\n\n`;
+    }
+
+    if (callbackMode && !hasCustomerName) {
+      collectionInstructions += `IMPORTANT: After the caller gives their name, repeat it back and ask them to confirm yes/no. If they correct it, use update_customer_info with the corrected name.\n\n`;
+    }
+
+    if (
+      callbackMode &&
+      requestInfo.callbackNumber === true &&
+      !callbackNumberConfirmed
+    ) {
+      if (callbackNumberCandidate) {
+        session.workflowContext = session.workflowContext || {};
+        session.workflowContext.pendingCallbackNumberCandidate = String(
+          callbackNumberCandidate
+        );
+        collectionInstructions += `IMPORTANT CALLBACK CONFIRMATION: The caller ID shows ${callbackNumberCandidate}. Ask: "Is ${callbackNumberCandidate} the best number to call you back?" If YES, call update_customer_info with phone "${callbackNumberCandidate}". If NO, ask for the correct callback number and call update_customer_info with phone.\n\n`;
+      } else {
+        collectionInstructions += `IMPORTANT: After they give a callback number, read it back slowly and ask them to confirm yes/no. If they correct it, use update_customer_info with the corrected phone number.\n\n`;
+      }
     }
 
     if (
@@ -3331,13 +3899,17 @@ Start by asking for the first item now.`;
         if (disableHangup) {
           currentSession.silencePromptCount = 0;
           currentSession.responseRequested = true;
+          const callbackMode = Boolean(
+            currentSession.workflowContext?.callbackRequested
+          );
           currentSession.openaiWs.send(
             JSON.stringify({
               type: "response.create",
               response: {
                 modalities: ["audio", "text"],
-                instructions:
-                  "Say: 'Are you still there? I can help you try a different number, or I can send you to voicemail.'",
+                instructions: callbackMode
+                  ? "Say: 'Are you still there? I can take a callback request. Please tell me your name, the best phone number to call you back, and a short message about what you need.'"
+                  : "Say: 'Are you still there? I can help you try a different number, or I can send you to voicemail.'",
               },
             })
           );

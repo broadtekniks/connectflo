@@ -562,6 +562,7 @@ const Settings: React.FC = () => {
       email: string;
       extension: string;
       label: string | null;
+      forwardingNumber?: string | null;
       status: string;
     }>
   >([]);
@@ -576,7 +577,24 @@ const Settings: React.FC = () => {
   const [selectedUserId, setSelectedUserId] = useState<string>("");
   const [assignExtension, setAssignExtension] = useState<string>("");
   const [assignExtensionLabel, setAssignExtensionLabel] = useState<string>("");
+  const [assignExtensionForwarding, setAssignExtensionForwarding] =
+    useState<string>("");
   const [extensionSaving, setExtensionSaving] = useState(false);
+
+  // Call Groups state
+  const [callGroups, setCallGroups] = useState<any[]>([]);
+  const [callGroupsLoading, setCallGroupsLoading] = useState(false);
+  const [editingCallGroup, setEditingCallGroup] = useState<any | null>(null);
+  const [callGroupFormData, setCallGroupFormData] = useState({
+    name: "",
+    ringStrategy: "SEQUENTIAL" as "SEQUENTIAL" | "SIMULTANEOUS",
+    ringTimeoutSeconds: 20,
+    memberUserIds: [] as string[],
+  });
+  const [callGroupSaving, setCallGroupSaving] = useState(false);
+  const [showDeleteCallGroupModal, setShowDeleteCallGroupModal] =
+    useState(false);
+  const [callGroupToDelete, setCallGroupToDelete] = useState<any | null>(null);
 
   // Security state
   const [securityStatus, setSecurityStatus] = useState<{
@@ -760,6 +778,9 @@ const Settings: React.FC = () => {
       })
       .finally(() => setExtensionsLoading(false));
 
+    // Load call groups
+    loadCallGroups();
+
     // Load team members
     api
       .get("/team-members")
@@ -798,8 +819,19 @@ const Settings: React.FC = () => {
 
     socketService.onExtensionPresenceUpdated(handlePresenceUpdate);
 
+    // Subscribe to team member check-in updates to refresh call group member status
+    const handleTeamMemberCheckinUpdate = () => {
+      console.log("Team member check-in updated, refreshing call groups");
+      loadCallGroups().catch((e) =>
+        console.error("Failed to refresh call groups", e)
+      );
+    };
+
+    socketService.onTeamMemberCheckinUpdated(handleTeamMemberCheckinUpdate);
+
     return () => {
       socketService.offExtensionPresenceUpdated();
+      socketService.offTeamMemberCheckinUpdated(handleTeamMemberCheckinUpdate);
     };
   }, [user]);
 
@@ -903,6 +935,7 @@ const Settings: React.FC = () => {
         userId: selectedUserId,
         extension: assignExtension.trim(),
         label: assignExtensionLabel.trim() || undefined,
+        forwardingNumber: assignExtensionForwarding.trim() || undefined,
       });
 
       setSettingsAlertModal({
@@ -916,6 +949,7 @@ const Settings: React.FC = () => {
       setSelectedUserId("");
       setAssignExtension("");
       setAssignExtensionLabel("");
+      setAssignExtensionForwarding("");
 
       const data: any = await api.get("/extensions");
       setExtensions(data.extensions || []);
@@ -967,9 +1001,11 @@ const Settings: React.FC = () => {
     if (existingExt) {
       setAssignExtension(existingExt.extension || "");
       setAssignExtensionLabel(existingExt.label || "");
+      setAssignExtensionForwarding(existingExt.forwardingNumber || "");
     } else {
       setAssignExtension("");
       setAssignExtensionLabel("");
+      setAssignExtensionForwarding("");
     }
   };
 
@@ -1260,6 +1296,123 @@ const Settings: React.FC = () => {
     });
   };
 
+  // Call Groups handlers
+  const loadCallGroups = async () => {
+    if (!user?.tenantId) return;
+    if (user.role !== "TENANT_ADMIN" && user.role !== "SUPER_ADMIN") return;
+
+    setCallGroupsLoading(true);
+    try {
+      const groups = await api.get("/call-groups");
+      setCallGroups(Array.isArray(groups) ? groups : []);
+    } catch (error) {
+      console.error("Failed to load call groups:", error);
+      setCallGroups([]);
+    } finally {
+      setCallGroupsLoading(false);
+    }
+  };
+
+  const handleSaveCallGroup = async () => {
+    if (!callGroupFormData.name.trim()) return;
+
+    setCallGroupSaving(true);
+    try {
+      if (editingCallGroup) {
+        await api.put(`/call-groups/${editingCallGroup.id}`, callGroupFormData);
+      } else {
+        await api.post("/call-groups", callGroupFormData);
+      }
+
+      await loadCallGroups();
+      setEditingCallGroup(null);
+      setCallGroupFormData({
+        name: "",
+        ringStrategy: "SEQUENTIAL",
+        ringTimeoutSeconds: 20,
+        memberUserIds: [],
+      });
+
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: `Call group ${
+          editingCallGroup ? "updated" : "created"
+        } successfully.`,
+        type: "success",
+      });
+    } catch (error: any) {
+      console.error("Failed to save call group:", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Error",
+        message:
+          error?.message || "Failed to save call group. Please try again.",
+        type: "error",
+      });
+    } finally {
+      setCallGroupSaving(false);
+    }
+  };
+
+  const handleEditCallGroup = (group: any) => {
+    setEditingCallGroup(group);
+    setCallGroupFormData({
+      name: group.name,
+      ringStrategy: group.ringStrategy,
+      ringTimeoutSeconds: group.ringTimeoutSeconds,
+      memberUserIds: group.members?.map((m: any) => m.userId) || [],
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleCancelCallGroupEdit = () => {
+    setEditingCallGroup(null);
+    setCallGroupFormData({
+      name: "",
+      ringStrategy: "SEQUENTIAL",
+      ringTimeoutSeconds: 20,
+      memberUserIds: [],
+    });
+  };
+
+  const handleDeleteCallGroup = (groupId: string) => {
+    const group = callGroups.find((g) => g.id === groupId);
+    setCallGroupToDelete(group || null);
+    setShowDeleteCallGroupModal(true);
+  };
+
+  const handleConfirmDeleteCallGroup = async () => {
+    if (!callGroupToDelete) return;
+
+    try {
+      await api.delete(`/call-groups/${callGroupToDelete.id}`);
+      await loadCallGroups();
+      setShowDeleteCallGroupModal(false);
+      setCallGroupToDelete(null);
+
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Success",
+        message: "Call group deleted successfully.",
+        type: "success",
+      });
+    } catch (error) {
+      console.error("Failed to delete call group:", error);
+      setSettingsAlertModal({
+        isOpen: true,
+        title: "Error",
+        message: "Failed to delete call group. Please try again.",
+        type: "error",
+      });
+    }
+  };
+
+  const handleCancelDeleteCallGroup = () => {
+    setShowDeleteCallGroupModal(false);
+    setCallGroupToDelete(null);
+  };
+
   const allTabs: Array<{
     id: string;
     label: string;
@@ -1291,6 +1444,12 @@ const Settings: React.FC = () => {
       roles: ["TENANT_ADMIN", "SUPER_ADMIN", "AGENT"],
     },
     {
+      id: "call-groups",
+      label: "Call Groups",
+      icon: Users,
+      roles: ["TENANT_ADMIN", "SUPER_ADMIN"],
+    },
+    {
       id: "ai-agent",
       label: "AI Agent",
       icon: Bot,
@@ -1318,7 +1477,11 @@ const Settings: React.FC = () => {
 
   // Keep these tabs available via Telephony sidebar deep-links
   // (Settings page should not show duplicate menu items).
-  const hiddenFromSettingsMenu = new Set(["web-phone", "extensions"]);
+  const hiddenFromSettingsMenu = new Set([
+    "web-phone",
+    "extensions",
+    "call-groups",
+  ]);
 
   const allowedTabs = allTabs.filter((t) =>
     t.roles.includes((user?.role || "AGENT") as any)
@@ -2856,119 +3019,473 @@ const Settings: React.FC = () => {
               </div>
             )}
 
+          {/* --- CALL GROUPS --- */}
+          {activeTab === "call-groups" && (
+            <div className="space-y-8 animate-fade-in">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">
+                  Call Groups
+                </h2>
+                <p className="text-slate-500">
+                  Create groups of agents to ring simultaneously or
+                  sequentially.
+                </p>
+              </div>
+
+              {(user?.role === "TENANT_ADMIN" ||
+                user?.role === "SUPER_ADMIN") && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Users size={18} className="text-indigo-500" />
+                    {editingCallGroup ? "Edit Call Group" : "Create Call Group"}
+                  </h3>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Group Name
+                      </label>
+                      <input
+                        type="text"
+                        value={callGroupFormData.name}
+                        onChange={(e) =>
+                          setCallGroupFormData({
+                            ...callGroupFormData,
+                            name: e.target.value,
+                          })
+                        }
+                        placeholder="e.g., Sales Team, Support Team"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                        disabled={callGroupSaving}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                          Ring Strategy
+                        </label>
+                        <select
+                          value={callGroupFormData.ringStrategy}
+                          onChange={(e) =>
+                            setCallGroupFormData({
+                              ...callGroupFormData,
+                              ringStrategy: e.target.value as
+                                | "SEQUENTIAL"
+                                | "SIMULTANEOUS",
+                            })
+                          }
+                          className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                          disabled={callGroupSaving}
+                        >
+                          <option value="SEQUENTIAL">
+                            Sequential (one by one)
+                          </option>
+                          <option value="SIMULTANEOUS">
+                            Simultaneous (all at once)
+                          </option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                          Ring Timeout (seconds)
+                        </label>
+                        <input
+                          type="number"
+                          min={5}
+                          max={60}
+                          value={callGroupFormData.ringTimeoutSeconds}
+                          onChange={(e) =>
+                            setCallGroupFormData({
+                              ...callGroupFormData,
+                              ringTimeoutSeconds: Math.min(
+                                60,
+                                Math.max(5, parseInt(e.target.value) || 20)
+                              ),
+                            })
+                          }
+                          className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                          disabled={callGroupSaving}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        Group Members
+                      </label>
+                      <div className="border border-slate-300 rounded-lg p-4 space-y-2 max-h-64 overflow-y-auto">
+                        {teamMembers.length === 0 ? (
+                          <p className="text-sm text-slate-400">
+                            No team members available
+                          </p>
+                        ) : (
+                          <>
+                            {/* Selected members (draggable) */}
+                            {callGroupFormData.memberUserIds.map((userId, index) => {
+                              const member = teamMembers.find(m => m.id === userId);
+                              if (!member) return null;
+                              return (
+                                <div
+                                  key={member.id}
+                                  draggable={!callGroupSaving}
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.effectAllowed = "move";
+                                    e.dataTransfer.setData("text/plain", index.toString());
+                                  }}
+                                  onDragOver={(e) => {
+                                    e.preventDefault();
+                                    e.dataTransfer.dropEffect = "move";
+                                  }}
+                                  onDrop={(e) => {
+                                    e.preventDefault();
+                                    const fromIndex = parseInt(e.dataTransfer.getData("text/plain"));
+                                    const toIndex = index;
+                                    if (fromIndex === toIndex) return;
+                                    
+                                    const newMemberIds = [...callGroupFormData.memberUserIds];
+                                    const [movedId] = newMemberIds.splice(fromIndex, 1);
+                                    newMemberIds.splice(toIndex, 0, movedId);
+                                    
+                                    setCallGroupFormData({
+                                      ...callGroupFormData,
+                                      memberUserIds: newMemberIds,
+                                    });
+                                  }}
+                                  className="flex items-center gap-2 p-2 bg-indigo-50 border border-indigo-200 rounded cursor-move hover:bg-indigo-100 transition-colors"
+                                >
+                                  <span className="text-slate-400 text-xs font-mono">::</span>
+                                  <span className="text-sm text-slate-700 flex-1">
+                                    {member.name} ({member.email})
+                                  </span>
+                                  <button
+                                    onClick={() => {
+                                      setCallGroupFormData({
+                                        ...callGroupFormData,
+                                        memberUserIds: callGroupFormData.memberUserIds.filter(
+                                          (id) => id !== member.id
+                                        ),
+                                      });
+                                    }}
+                                    className="text-slate-400 hover:text-red-600 transition-colors"
+                                    disabled={callGroupSaving}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              );
+                            })}
+                            
+                            {/* Available members (checkboxes) */}
+                            {teamMembers
+                              .filter(member => !callGroupFormData.memberUserIds.includes(member.id))
+                              .map((member) => (
+                                <label
+                                  key={member.id}
+                                  className="flex items-center gap-2 p-2 hover:bg-slate-50 rounded cursor-pointer"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={false}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setCallGroupFormData({
+                                          ...callGroupFormData,
+                                          memberUserIds: [
+                                            ...callGroupFormData.memberUserIds,
+                                            member.id,
+                                          ],
+                                        });
+                                      }
+                                    }}
+                                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                    disabled={callGroupSaving}
+                                  />
+                                  <span className="text-sm text-slate-700">
+                                    {member.name} ({member.email})
+                                  </span>
+                                </label>
+                              ))}
+                          </>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {callGroupFormData.ringStrategy === "SEQUENTIAL"
+                          ? "Drag members to reorder. Members will be called in the order shown."
+                          : "All members will be called simultaneously."}
+                      </p>
+                    </div>
+
+                    <div className="flex gap-2 justify-end pt-4">
+                      {editingCallGroup && (
+                        <button
+                          onClick={handleCancelCallGroupEdit}
+                          className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
+                          disabled={callGroupSaving}
+                        >
+                          Cancel
+                        </button>
+                      )}
+                      <button
+                        onClick={handleSaveCallGroup}
+                        disabled={
+                          callGroupSaving || !callGroupFormData.name.trim()
+                        }
+                        className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-indigo-700 shadow-sm flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <Save size={18} />
+                        {callGroupSaving
+                          ? "Saving..."
+                          : editingCallGroup
+                          ? "Update Group"
+                          : "Create Group"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                <h3 className="font-bold text-slate-800 mb-4">
+                  Existing Call Groups
+                </h3>
+
+                {callGroupsLoading ? (
+                  <p className="text-slate-400 text-sm">
+                    Loading call groups...
+                  </p>
+                ) : callGroups.length === 0 ? (
+                  <p className="text-slate-400 text-sm">
+                    No call groups created yet. Create one above to get started.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {callGroups.map((group) => (
+                      <div
+                        key={group.id}
+                        className="border border-slate-200 rounded-lg p-4 hover:border-indigo-300 transition-colors"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-bold text-slate-800">
+                                {group.name}
+                              </h4>
+                              <span
+                                className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                                  group.ringStrategy === "SIMULTANEOUS"
+                                    ? "bg-green-100 text-green-700"
+                                    : "bg-blue-100 text-blue-700"
+                                }`}
+                              >
+                                {group.ringStrategy === "SIMULTANEOUS"
+                                  ? "Simultaneous"
+                                  : "Sequential"}
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-slate-100 text-slate-600">
+                                {group.ringTimeoutSeconds}s timeout
+                              </span>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {group.members && group.members.length > 0 ? (
+                                group.members.map(
+                                  (member: any, idx: number) => (
+                                    <div
+                                      key={member.id}
+                                      className="text-xs bg-slate-50 px-2 py-1 rounded border border-slate-200 flex items-center gap-1"
+                                    >
+                                      {group.ringStrategy === "SEQUENTIAL" && (
+                                        <span className="font-bold text-slate-400">
+                                          #{idx + 1}
+                                        </span>
+                                      )}
+                                      <span className="text-slate-700">
+                                        {member.user?.name || "Unknown"}
+                                      </span>
+                                      {member.user?.isCheckedIn && (
+                                        <span
+                                          className="w-2 h-2 bg-green-500 rounded-full"
+                                          title="Checked in"
+                                        />
+                                      )}
+                                    </div>
+                                  )
+                                )
+                              ) : (
+                                <span className="text-xs text-slate-400">
+                                  No members
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          {(user?.role === "TENANT_ADMIN" ||
+                            user?.role === "SUPER_ADMIN") && (
+                            <div className="flex gap-2 ml-4">
+                              <button
+                                onClick={() => handleEditCallGroup(group)}
+                                className="text-indigo-600 hover:text-indigo-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-indigo-50"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteCallGroup(group.id)}
+                                className="text-red-600 hover:text-red-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-red-50"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* --- EXTENSIONS --- */}
           {activeTab === "extensions" && (
             <div className="space-y-8 animate-fade-in">
               <div>
                 <h2 className="text-xl font-bold text-slate-900">Extensions</h2>
                 <p className="text-slate-500">
-                  Assign internal extension numbers for free VoIP calling
-                  between team members.
+                  {user?.role === "AGENT"
+                    ? "View internal extension numbers for calling team members."
+                    : "Assign internal extension numbers for free VoIP calling between team members."}
                 </p>
               </div>
 
-              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <Phone size={18} className="text-indigo-500" /> Assign
-                  Extension
-                </h3>
+              {(user?.role === "TENANT_ADMIN" ||
+                user?.role === "SUPER_ADMIN") && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Phone size={18} className="text-indigo-500" /> Assign
+                    Extension
+                  </h3>
 
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1.5fr] gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
-                        Team Member
-                      </label>
-                      <select
-                        value={selectedUserId}
-                        onChange={(e) => handleTeamMemberSelect(e.target.value)}
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                        disabled={extensionSaving}
-                      >
-                        <option value="">Select a team member...</option>
-                        {teamMembers.map((member) => {
-                          const hasExtension = extensions.find(
-                            (e) => e.userId === member.id
-                          );
-                          return (
-                            <option key={member.id} value={member.id}>
-                              {member.name} ({member.email})
-                              {hasExtension
-                                ? ` - Ext. ${hasExtension.extension}`
-                                : ""}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2 whitespace-nowrap">
-                        Extension (3-4 digits)
-                      </label>
-                      <input
-                        type="text"
-                        value={assignExtension}
-                        onChange={(e) => {
-                          const val = e.target.value
-                            .replace(/\D/g, "")
-                            .slice(0, 4);
-                          setAssignExtension(val);
-                        }}
-                        placeholder="e.g., 101"
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                        disabled={extensionSaving || !selectedUserId}
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
-                        Label (optional)
-                      </label>
-                      <input
-                        type="text"
-                        value={assignExtensionLabel}
-                        onChange={(e) =>
-                          setAssignExtensionLabel(e.target.value)
-                        }
-                        placeholder="e.g., Sales, Support, Main Desk"
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                        disabled={extensionSaving || !selectedUserId}
-                      />
-                    </div>
-                  </div>
-
-                  <p className="text-xs text-slate-400">
-                    Team members can call each other at their extensions for
-                    FREE via VoIP
-                  </p>
-
-                  <div className="flex items-center justify-end gap-3">
-                    {selectedUserId &&
-                      extensions.find((e) => e.userId === selectedUserId) && (
-                        <button
-                          onClick={() => handleRemoveExtension(selectedUserId)}
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1.5fr] gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                          Team Member
+                        </label>
+                        <select
+                          value={selectedUserId}
+                          onChange={(e) =>
+                            handleTeamMemberSelect(e.target.value)
+                          }
+                          className="w-full border border-slate-300 rounded-lg px-3 py-2"
                           disabled={extensionSaving}
-                          className="text-red-600 px-6 py-2 rounded-lg font-medium hover:bg-red-50 disabled:opacity-50"
                         >
-                          Remove Extension
-                        </button>
-                      )}
-                    <button
-                      onClick={handleAssignExtension}
-                      disabled={
-                        extensionSaving ||
-                        !selectedUserId ||
-                        !assignExtension ||
-                        assignExtension.length < 3
-                      }
-                      className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
-                    >
-                      {extensionSaving ? "Saving…" : "Assign Extension"}
-                    </button>
+                          <option value="">Select a team member...</option>
+                          {teamMembers.map((member) => {
+                            const hasExtension = extensions.find(
+                              (e) => e.userId === member.id
+                            );
+                            return (
+                              <option key={member.id} value={member.id}>
+                                {member.name} ({member.email})
+                                {hasExtension
+                                  ? ` - Ext. ${hasExtension.extension}`
+                                  : ""}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2 whitespace-nowrap">
+                          Extension (3-4 digits)
+                        </label>
+                        <input
+                          type="text"
+                          value={assignExtension}
+                          onChange={(e) => {
+                            const val = e.target.value
+                              .replace(/\D/g, "")
+                              .slice(0, 4);
+                            setAssignExtension(val);
+                          }}
+                          placeholder="e.g., 101"
+                          className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                          disabled={extensionSaving || !selectedUserId}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                          Label (optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={assignExtensionLabel}
+                          onChange={(e) =>
+                            setAssignExtensionLabel(e.target.value)
+                          }
+                          placeholder="e.g., Sales, Support, Main Desk"
+                          className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                          disabled={extensionSaving || !selectedUserId}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        External Forwarding Number (optional)
+                      </label>
+                      <input
+                        type="tel"
+                        value={assignExtensionForwarding}
+                        onChange={(e) =>
+                          setAssignExtensionForwarding(e.target.value)
+                        }
+                        placeholder="e.g., +1234567890"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                        disabled={extensionSaving || !selectedUserId}
+                      />
+                      <p className="text-xs text-slate-500 mt-1">
+                        If the user is offline or doesn't pick up, calls will be
+                        forwarded to this external number
+                      </p>
+                    </div>
+
+                    <p className="text-xs text-slate-400 mt-4">
+                      Team members can call each other at their extensions for
+                      FREE via VoIP
+                    </p>
+
+                    <div className="flex items-center justify-end gap-3">
+                      {selectedUserId &&
+                        extensions.find((e) => e.userId === selectedUserId) && (
+                          <button
+                            onClick={() =>
+                              handleRemoveExtension(selectedUserId)
+                            }
+                            disabled={extensionSaving}
+                            className="text-red-600 px-6 py-2 rounded-lg font-medium hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Remove Extension
+                          </button>
+                        )}
+                      <button
+                        onClick={handleAssignExtension}
+                        disabled={
+                          extensionSaving ||
+                          !selectedUserId ||
+                          !assignExtension ||
+                          assignExtension.length < 3
+                        }
+                        className="bg-indigo-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50"
+                      >
+                        {extensionSaving ? "Saving…" : "Assign Extension"}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
 
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
                 <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
@@ -3005,6 +3522,12 @@ const Settings: React.FC = () => {
                               )}
                               {ext.email}
                             </div>
+                            {(ext as any).forwardingNumber && (
+                              <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                                <Phone size={12} />
+                                Forwards to: {(ext as any).forwardingNumber}
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-3">
@@ -3021,26 +3544,39 @@ const Settings: React.FC = () => {
                           >
                             {ext.status}
                           </span>
-                          <button
-                            onClick={() => {
-                              setSelectedUserId(ext.userId);
-                              setAssignExtension(ext.extension || "");
-                              setAssignExtensionLabel(ext.label || "");
-                              // Scroll to top to show the assignment form
-                              window.scrollTo({ top: 0, behavior: "smooth" });
-                            }}
-                            className="text-indigo-600 hover:text-indigo-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-indigo-50"
-                            disabled={extensionSaving}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleRemoveExtension(ext.userId)}
-                            className="text-red-600 hover:text-red-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-red-50"
-                            disabled={extensionSaving}
-                          >
-                            Remove
-                          </button>
+                          {(user?.role === "TENANT_ADMIN" ||
+                            user?.role === "SUPER_ADMIN") && (
+                            <>
+                              <button
+                                onClick={() => {
+                                  setSelectedUserId(ext.userId);
+                                  setAssignExtension(ext.extension || "");
+                                  setAssignExtensionLabel(ext.label || "");
+                                  setAssignExtensionForwarding(
+                                    (ext as any).forwardingNumber || ""
+                                  );
+                                  // Scroll to top to show the assignment form
+                                  window.scrollTo({
+                                    top: 0,
+                                    behavior: "smooth",
+                                  });
+                                }}
+                                className="text-indigo-600 hover:text-indigo-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-indigo-50"
+                                disabled={extensionSaving}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() =>
+                                  handleRemoveExtension(ext.userId)
+                                }
+                                className="text-red-600 hover:text-red-800 px-3 py-1 rounded-lg text-sm font-medium hover:bg-red-50"
+                                disabled={extensionSaving}
+                              >
+                                Remove
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -3065,6 +3601,21 @@ const Settings: React.FC = () => {
         isDestructive
         onConfirm={handleConfirmDeletePlan}
         onCancel={handleCancelDeletePlan}
+      />
+
+      <ConfirmationModal
+        isOpen={showDeleteCallGroupModal}
+        title="Delete call group?"
+        message={
+          callGroupToDelete
+            ? `This will permanently delete the call group "${callGroupToDelete.name}".`
+            : "This will permanently delete the call group."
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        isDestructive
+        onConfirm={handleConfirmDeleteCallGroup}
+        onCancel={handleCancelDeleteCallGroup}
       />
 
       <AlertModal
